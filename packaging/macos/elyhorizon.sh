@@ -44,7 +44,7 @@ plutil -lint "$app/Contents/Info.plist"
 # Sign nested executables first, then seal the app. No credentials are needed for ad hoc signatures.
 codesign --force --sign - "$app/Contents/MacOS/horizon-client"
 codesign --force --sign - "$app/Contents/MacOS/horizon-launcher"
-codesign --force --sign - "$app"
+codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
 "$app/Contents/MacOS/horizon-launcher" --version
 "$app/Contents/MacOS/horizon-client" --help > /dev/null

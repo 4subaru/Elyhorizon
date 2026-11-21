@@ -68,7 +68,8 @@ impl Kind {
         }
     }
 
-    /// The extension of its files; None for a kind this build doesn't know.
+    /// The extension its files are published with; None for a kind this build doesn't know.
+    /// [`Kind::accepts`] lists every extension it reads, which is wider for native mods.
     pub fn extension(&self) -> Option<&'static str> {
         match self {
             Kind::Mod => Some("hmod"),
@@ -77,6 +78,18 @@ impl Kind {
             Kind::ResourcePack => Some("zip"),
             Kind::Shader => Some(horizon_shader_api::EXTENSION),
             Kind::Other(_) => None,
+        }
+    }
+
+    /// Whether a version's file name `name` is one this kind reads. A native mod is published as
+    /// an `.hnmod`, and also read as a `.hmod` holding native code (docs/native-mods.md); kinds
+    /// this build doesn't know accept any plain name.
+    pub fn accepts(&self, name: &str) -> bool {
+        match self {
+            Kind::NativeMod => name.ends_with(".hnmod") || name.ends_with(".hmod"),
+            _ => self
+                .extension()
+                .is_none_or(|e| name.ends_with(&format!(".{e}"))),
         }
     }
 }
@@ -235,7 +248,7 @@ impl Index {
     }
 
     /// Every rule a reader relies on: unique valid ids, at least one
-    /// version each, plain file names with the kind's extension, `https`
+    /// version each, plain file names with one of the kind's extensions, `https`
     /// URLs, hex hashes, keys and signatures that decode, and each
     /// modpack's mods present in the index with the same hash.
     pub fn check(&self) -> Result<(), String> {
@@ -273,11 +286,7 @@ impl Index {
                     return Err(at("empty or repeated version".into()));
                 }
                 let f = &v.file;
-                let extension_ok = p
-                    .kind
-                    .extension()
-                    .is_none_or(|e| f.name.ends_with(&format!(".{e}")));
-                if !plain_name(&f.name) || !extension_ok {
+                if !plain_name(&f.name) || !p.kind.accepts(&f.name) {
                     return Err(at(format!(
                         "{:?} is not a plain file name for a {}",
                         f.name,

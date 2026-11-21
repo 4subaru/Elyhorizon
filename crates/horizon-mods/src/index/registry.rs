@@ -503,13 +503,15 @@ pub fn release_version(entry: &Entry, r: &Release, path: &Path) -> Result<Versio
             r.tag, r.asset
         ));
     }
-    let want = entry.kind.extension();
-    if want.is_some_and(|e| !r.asset.ends_with(&format!(".{e}"))) {
-        return Err(format!(
-            "{:?} is not a .{} file",
-            r.asset,
-            want.unwrap_or("")
-        ));
+    if !entry.kind.accepts(r.asset) {
+        let want = match &entry.kind {
+            Kind::NativeMod => ".hmod or .hnmod".to_owned(),
+            kind => kind
+                .extension()
+                .map(|e| format!(".{e}"))
+                .unwrap_or_default(),
+        };
+        return Err(format!("{:?} is not a {want} file", r.asset));
     }
     let facts = inspect(&entry.kind, path)?;
     let version = facts

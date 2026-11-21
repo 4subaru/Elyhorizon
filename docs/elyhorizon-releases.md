@@ -12,8 +12,9 @@ environment, or a personal access token. The release job uses GitHub's automatic
 3. Choose the branch and enter a new version, for example `0.2.1`.
 4. Leave **publish** enabled to create a release, or disable it to build only.
 
-Alternatively, push a tag such as `elyhorizon-v0.2.1`. That automatically builds
-and publishes that commit. Versions containing a suffix, such as `0.2.1-beta.1`,
+Alternatively, push a `v0.2.1` or `elyhorizon-v0.2.1` tag. That automatically builds
+and publishes that commit as `elyhorizon-v0.2.1` (the fork's own tag, so the launcher
+never mistakes it for an upstream launcher release). Versions containing a suffix, such as `0.2.1-beta.1`,
 become prereleases. Releases are not marked as the repository's latest, so they
 do not replace the upstream game channel. Existing tags must point to the exact
 commit being built; existing releases are not overwritten. If publishing fails
@@ -36,7 +37,7 @@ for each platform (static Windows C runtime, checked DLL imports) and uploads:
 - `Elyhorizon-<version>-linux-x86_64.tar.gz`
 - `Elyhorizon-<version>-macos-arm64.dmg` and `.zip`
 - `Elyhorizon-<version>-macos-x64.dmg` and `.zip`
-- `SHA256SUMS` (all platforms)
+- `SHA256SUMS.txt` (all platforms)
 
 The installer installs both the launcher and matching Horizon client under
 `%LOCALAPPDATA%\Programs\Elyhorizon`, creates a Start menu shortcut and optionally
@@ -67,7 +68,7 @@ Ely.by configuration in both packages without runtime variables, and compares th
 AppImage's client with the original after applying the same ELF run path change.
 The AppImage can use `--appimage-extract-and-run` without FUSE. Linux artifacts are
 uploaded as `elyhorizon-linux-x86_64`; publication waits for all platform jobs and
-merges their checksums into one `SHA256SUMS` file.
+merges their checksums into one `SHA256SUMS.txt` file.
 
 A second smoke check runs the actual AppImage in a fresh `archlinux:base`
 container, checking launcher startup, embedded public authentication configuration
@@ -81,8 +82,10 @@ Two native GitHub-hosted runners build the Mac packages: `macos-15` for Apple
 Silicon and `macos-15-intel` for Intel. No upstream self-hosted runner or Rosetta
 is required. The deployment target and bundle minimum are macOS 12.0; the actual
 startup checks run on macOS 15. Older OS and graphical compatibility need manual
-verification. GPUI uses runtime Metal shaders, so a separate Metal compiler
-download is not required.
+verification. GPUI uses runtime Metal shaders, so the job first checks for the
+Metal compiler and, when the selected Xcode lacks it (Xcode 26 ships it as a
+separate component), downloads it with
+`xcodebuild -downloadComponent MetalToolchain`.
 
 `packaging/macos/elyhorizon.sh` checks both Mach-O architectures, creates
 `Elyhorizon.app` with the launcher and matching client in `Contents/MacOS`, adds
@@ -93,7 +96,9 @@ executable contents, and checks embedded PKCE configuration without runtime Ely
 variables. Publication waits for both Mac architectures, Windows and Linux.
 
 These packages are **not Apple-notarized** and do not use a Developer ID certificate.
-Gatekeeper may require explicit user approval; this workflow does not disable it.
+Gatekeeper may require explicit user approval, for example
+`xattr -cr /Applications/Elyhorizon.app` before opening the app; this workflow
+does not disable Gatekeeper.
 Developer ID signing and notarization require a separate Apple developer setup.
 See [Apple's distribution guidance](https://developer.apple.com/macos/distribution).
 

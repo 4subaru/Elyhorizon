@@ -2,7 +2,9 @@ name: Elyhorizon release
 
 on:
   push:
-    tags: ['elyhorizon-v*']
+    tags:
+      - 'v*'
+      - 'elyhorizon-v*'
   workflow_dispatch:
     inputs:
       version:
@@ -49,17 +51,20 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          $version = if ($env:GITHUB_EVENT_NAME -eq 'push') {
-            $env:GITHUB_REF_NAME -replace '^elyhorizon-v', ''
-          } else { $env:INPUT_VERSION }
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $version = $env:GITHUB_REF_NAME -replace '^elyhorizon-v', '' -replace '^v', ''
+          } else {
+            $version = $env:INPUT_VERSION
+          }
+          $tag = "elyhorizon-v$version"
           if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') {
             throw 'Expected a version such as 0.2.1 or 0.2.1-beta.1'
           }
           "version=$version" >> $env:GITHUB_OUTPUT
-          "tag=elyhorizon-v$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
           "commit=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
           "HORIZON_LAUNCHER_VERSION=$version" >> $env:GITHUB_ENV
-          "HORIZON_LAUNCHER_TAG=elyhorizon-v$version" >> $env:GITHUB_ENV
+          "HORIZON_LAUNCHER_TAG=$tag" >> $env:GITHUB_ENV
           "HORIZON_VERSION=$version" >> $env:GITHUB_ENV
           $scratch = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
           foreach ($key in @('HORIZON_HOME', 'HORIZON_LAUNCHER_HOME', 'XDG_DATA_HOME',
@@ -158,14 +163,14 @@ jobs:
           Get-ChildItem dist -File | Where-Object { $_.Extension -in @('.zip', '.exe') } | Sort-Object Name | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($_.Name)"
-          } | Set-Content -Encoding ascii dist/SHA256SUMS
+          } | Set-Content -Encoding ascii dist/SHA256SUMS-windows
       - uses: actions/upload-artifact@v4
         with:
           name: elyhorizon-windows-x64
           path: |
             dist/*.zip
             dist/*-setup.exe
-            dist/SHA256SUMS
+            dist/SHA256SUMS-windows
           if-no-files-found: error
           retention-days: 14
 
@@ -192,11 +197,15 @@ jobs:
         run: |
           set -euo pipefail
           version=$INPUT_VERSION
-          if [[ "$GITHUB_EVENT_NAME" == push ]]; then version=${GITHUB_REF_NAME#elyhorizon-v}; fi
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            version=${GITHUB_REF_NAME#elyhorizon-v}
+            version=${version#v}
+          fi
+          tag=elyhorizon-v$version
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || { echo '::error::Invalid release version'; exit 1; }
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "HORIZON_LAUNCHER_VERSION=$version" >> "$GITHUB_ENV"
-          echo "HORIZON_LAUNCHER_TAG=elyhorizon-v$version" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_TAG=$tag" >> "$GITHUB_ENV"
           echo "HORIZON_VERSION=$version" >> "$GITHUB_ENV"
           scratch=$(mktemp -d)
           for key in HORIZON_HOME HORIZON_LAUNCHER_HOME XDG_DATA_HOME XDG_CONFIG_HOME HORIZON_LAUNCHER_TRASH HORIZON_LAUNCHER_CLIPBOARD HORIZON_LAUNCHER_DESKTOP; do
@@ -335,11 +344,15 @@ jobs:
         run: |
           set -euo pipefail
           version=$INPUT_VERSION
-          if [[ "$GITHUB_EVENT_NAME" == push ]]; then version=${GITHUB_REF_NAME#elyhorizon-v}; fi
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            version=${GITHUB_REF_NAME#elyhorizon-v}
+            version=${version#v}
+          fi
+          tag=elyhorizon-v$version
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || { echo '::error::Invalid release version'; exit 1; }
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "HORIZON_LAUNCHER_VERSION=$version" >> "$GITHUB_ENV"
-          echo "HORIZON_LAUNCHER_TAG=elyhorizon-v$version" >> "$GITHUB_ENV"
+          echo "HORIZON_LAUNCHER_TAG=$tag" >> "$GITHUB_ENV"
           echo "HORIZON_VERSION=$version" >> "$GITHUB_ENV"
           scratch=$(mktemp -d)
           for key in HORIZON_HOME HORIZON_LAUNCHER_HOME XDG_DATA_HOME XDG_CONFIG_HOME HORIZON_LAUNCHER_TRASH HORIZON_LAUNCHER_CLIPBOARD HORIZON_LAUNCHER_DESKTOP; do
@@ -360,6 +373,20 @@ jobs:
             . -> target
             launcher -> target
           shared-key: elyhorizon-macos-${{ matrix.arch }}
+      - name: Ensure the Metal compiler
+        run: |
+          set -euo pipefail
+          if xcrun --sdk macosx metal --version > /dev/null 2>&1; then
+            xcrun --sdk macosx metal --version
+            exit 0
+          fi
+          # Xcode 26 ships the Metal toolchain as a separate component. Newer runners may lack it.
+          xcodebuild -help 2>&1 | grep -q -- '-downloadComponent' || {
+            echo '::error::This Xcode has no Metal compiler and cannot download one; select a full Xcode with Metal support.'
+            exit 1
+          }
+          sudo xcodebuild -downloadComponent MetalToolchain
+          xcrun --sdk macosx --find metal
       - name: Test and build launcher with runtime Metal shaders
         run: |
           cargo test --manifest-path launcher/Cargo.toml --release --locked --features gpui_platform/runtime_shaders --lib --bins
@@ -429,14 +456,18 @@ jobs:
           path: dist
       - name: Combine platform checksums
         run: |
-          sed -i 's/\r$//' dist/SHA256SUMS
+          set -euo pipefail
+          : > dist/SHA256SUMS.txt
           for sums in dist/SHA256SUMS-*; do
-            cat "$sums" >> dist/SHA256SUMS
+            [[ -f "$sums" ]] || continue
+            sed 's/\r$//' "$sums" >> dist/SHA256SUMS.txt
             rm "$sums"
           done
-      - name: Verify archive checksum
+          test -s dist/SHA256SUMS.txt
+          sort -k2 dist/SHA256SUMS.txt -o dist/SHA256SUMS.txt
+      - name: Verify archive checksums
         working-directory: dist
-        run: sha256sum --check SHA256SUMS
+        run: sha256sum --check SHA256SUMS.txt
       - name: Create or verify the release tag
         uses: actions/github-script@v7
         with:
@@ -454,28 +485,37 @@ jobs:
             if (commit.data.sha !== sha) {
               throw new Error('The release tag points to another commit; choose a new version.');
             }
-      - name: Publish release
+      - name: Refuse to overwrite an existing release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
-          cat > notes.md <<'NOTES'
-          Windows x64: download the windows-x64-setup.exe installer and run it.
-          The installer installs Elyhorizon for your Windows account, adds a Start menu shortcut,
-          and includes both the launcher and matching Horizon client. Administrator access is not required.
-          A portable ZIP is also available; extract it and keep both executables together.
-          Linux x86_64: download the AppImage, make it executable, and run it.
-          A tar.gz containing the launcher and matching client is also available.
-          macOS: choose arm64 for Apple Silicon or x64 for Intel; open the DMG and drag Elyhorizon into Applications.
-          Mac apps are ad hoc signed, not Apple-notarized; macOS may require explicit approval to open them.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::error::Release $TAG already exists; choose a new version."
+            exit 1
+          fi
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: Elyhorizon ${{ needs.build.outputs.version }}
+          files: |
+            dist/*.zip
+            dist/*-setup.exe
+            dist/*.tar.gz
+            dist/*.AppImage
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          prerelease: ${{ contains(needs.build.outputs.version, '-') }}
+          make_latest: 'false'
+          fail_on_unmatched_files: true
+          body: |
+            **Windows x64:** run the `windows-x64-setup.exe` installer, or extract the portable ZIP and keep both executables together.
+            **Linux x86_64:** make the AppImage executable and run it, or extract the tar.gz.
+            **macOS:** choose `arm64` for Apple Silicon or `x64` for Intel; open the DMG and drag Elyhorizon into Applications.
+            The app is ad hoc signed, not Apple-notarized. If macOS blocks it, run `xattr -cr /Applications/Elyhorizon.app` and open it again.
 
-          Includes the matching Horizon client with Ely.by account and skin support.
-          Browser sign-in uses public Desktop OAuth with S256 PKCE; no client secret is included or required.
-          SHA256SUMS contains the archive checksum. Minecraft game files are downloaded or prepared at runtime.
-          NOTES
-          options=(--latest=false)
-          if [[ "$VERSION" == *-* ]]; then options+=(--prerelease); fi
-          gh release create "$TAG" dist/*.zip dist/*-setup.exe dist/*.tar.gz dist/*.AppImage dist/*.dmg dist/SHA256SUMS --verify-tag \
-            --title "Elyhorizon $VERSION" --notes-file notes.md --draft "${options[@]}"
-          gh release edit "$TAG" --draft=false "${options[@]}"
+            Includes the matching Horizon client with Ely.by account and skin support.
+            Browser sign-in uses public Desktop OAuth with S256 PKCE; no client secret is included or required.
+            `SHA256SUMS.txt` lists every artifact. Minecraft game files are downloaded or prepared at runtime.

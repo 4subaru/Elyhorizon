@@ -153,6 +153,26 @@ fn refuses_broken_indexes() {
 }
 
 #[test]
+fn native_mods_read_hnmod_and_hmod_files() {
+    let mut native = sample().projects[0].clone();
+    native.kind = Kind::NativeMod;
+    let check_name = |name: &str| {
+        let mut project = native.clone();
+        project.versions[0].file.name = name.into();
+        Index {
+            schema: SCHEMA,
+            projects: vec![project],
+            ..Index::default()
+        }
+        .check()
+    };
+    assert!(check_name("coords_hud-0.1.0.hnmod").is_ok());
+    assert!(check_name("coords_hud-0.1.0.hmod").is_ok());
+    let e = check_name("coords_hud-0.1.0.zip").unwrap_err();
+    assert!(e.contains("plain file name"), "{e}");
+}
+
+#[test]
 fn resource_packs_need_a_pack_mcmeta() {
     use std::io::Write;
     let dir = std::env::temp_dir().join(format!("horizon-index-rp-{}", std::process::id()));
