@@ -71,7 +71,9 @@ jobs:
   # runner.name. The repository variable SELF_HOSTED_CI=all sends the Linux parts to our checks runners (label
   # horizon-checks), whose build folder persists (CARGO_TARGET_DIR, outside the checkout).
   # A fork that is not on Blacksmith (this one) points the fallback at GitHub's own runner instead
-  # (`|| 'ubuntu-latest'`), which needs no runner registration and bills no sponsor's minutes. Everything a
+  # (`|| 'ubuntu-latest'`) and sets the repository variable SELF_HOSTED_CI=off, which is what selects that
+  # fallback: unset, the light and checks pools are still asked for (docs/ci-runners.md#which-jobs-and-when).
+  # GitHub's runner needs no registration and bills no sponsor's minutes. Everything a
   # Blacksmith runner would add is gated on runner.name, so it simply does not run there: no sticky disk and no
   # mold, and each part builds into ./target in its checkout. install_rust.sh's HOSTED covers both, since
   # Blacksmith's image and GitHub's alike lack the ALSA and udev headers.

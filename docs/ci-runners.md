@@ -47,9 +47,11 @@ per part, side by side, each on a size that fits it:
 
 The Elyhorizon fork is not on Blacksmith and registers no runner of its own, so its copy points every one of those
 fallbacks at GitHub's own runner (`|| 'ubuntu-latest'`, and `install_rust.sh`'s `HOSTED` also true there, since
-GitHub's image lacks the ALSA and udev headers too). Everything Blacksmith adds is gated on `runner.name` — the
-sticky disk, `build_folder.sh`, mold — so on GitHub's runner each part just builds into `./target` in its checkout.
-The upstream labels stay in the same expressions, so wiring Blacksmith up later is a one-line revert per job.
+GitHub's image lacks the ALSA and udev headers too) and sets the repository variable `SELF_HOSTED_CI=off`, which is
+what selects a fallback: unset, the bots' and checks jobs still ask for our pools (the table above). Everything
+Blacksmith adds is gated on `runner.name` — the sticky disk, `build_folder.sh`, mold — so on GitHub's runner each
+part just builds into `./target` in its checkout. The upstream labels stay in the same expressions, so wiring
+Blacksmith up later is a revert of that commit plus `gh variable delete SELF_HOSTED_CI`.
 
 | Job | Runner | Merge queue |
 | --- | --- | --- |
