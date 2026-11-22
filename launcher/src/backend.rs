@@ -3141,11 +3141,15 @@ fn bundled_client(tag: &str, version: &Path, executable_dir: &Path) -> Option<Pa
     }
     // The run holder starts the game in the folder it ships in and opens that folder's
     // completion marker (holder::lease_paths treats a folder outside the launcher's data
-    // as a complete installation). Never hand it one that cannot carry the marker - a
-    // macOS app bundle's Contents/MacOS, unless packaging writes the marker before
-    // sealing the bundle (packaging/macos/elyhorizon.sh): the launch would be refused.
-    // The version's own game runs instead.
-    if !executable_dir.join(COMPLETE).is_file() {
+    // as a complete installation). Never hand it one that cannot carry the marker: the
+    // launch would be refused. On macOS the game never runs from the folder it ships in -
+    // client_program stages it into the version's own Horizon.app, and the installation
+    // the holder leases is the version folder, marked when the version was installed - and
+    // a macOS app bundle's Contents/MacOS cannot carry the marker at all: a file there
+    // that is not code verifies only through the detached signature codesign writes into
+    // its extended attributes, which the ZIP the package ships does not carry
+    // (packaging/macos/elyhorizon.sh).
+    if cfg!(not(target_os = "macos")) && !executable_dir.join(COMPLETE).is_file() {
         return None;
     }
     let installed = read_json(&version.join("research-lock.json"))?;
@@ -8684,12 +8688,17 @@ fn a_matching_bundled_game_is_used_without_replacing_custom_or_incompatible_buil
         bundled_client("nightly-2026-11-03-f42ef42", &version, &bundled),
         Some(bundled.join(CLIENT))
     );
-    // A shipping folder the run holder would refuse for its missing completion marker is
-    // not used: the version's own game runs.
+    // A Windows or Linux shipping folder without the completion marker is one the run holder
+    // would refuse, so the version's own game runs. A macOS bundle cannot carry the marker and
+    // stages the shipped game into the version's own bundle, which the holder leases from the
+    // version folder, so its missing marker refuses nothing.
     let unmarked = root.join("unmarked");
     fs::create_dir_all(&unmarked).unwrap();
     fs::write(unmarked.join(CLIENT), b"local game fixture").unwrap();
-    assert!(bundled_client("nightly-test", &version, &unmarked).is_none());
+    assert_eq!(
+        bundled_client("nightly-test", &version, &unmarked).is_some(),
+        cfg!(target_os = "macos")
+    );
     for custom in ["native-test", "imported-2026-11-03-test"] {
         assert!(bundled_client(custom, &version, &bundled).is_none());
     }

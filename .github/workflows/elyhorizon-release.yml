@@ -458,7 +458,13 @@ jobs:
           "$installed/Elyhorizon.app/Contents/MacOS/horizon-launcher" --json account ely-status > macos-auth.json
           jq -e --arg id "$expected" '.client_id == $id and .bundled_client_id == $id and .flow == "authorization_code_pkce" and .client_secret_required == false' macos-auth.json
           "$installed/Elyhorizon.app/Contents/MacOS/horizon-client" --help > /dev/null
-          python tools/check_launcher_package.py --launcher "$installed/Elyhorizon.app/Contents/MacOS/horizon-launcher" --client "$installed/Elyhorizon.app/Contents/MacOS/horizon-client" --client-id "$expected" --require-completion-marker
+          # Neither the wasm standard library member nor the completion marker travels in this
+          # bundle: a macOS app bundle's sealed Contents/MacOS can carry only the two programs,
+          # because a file there that is not code keeps its signature in an extended attribute
+          # the ZIP does not carry (packaging/macos/elyhorizon.sh). The launcher stages the
+          # shipped game into the version's own Horizon.app and the version folder carries the
+          # marker the run holder opens, so neither is required here.
+          python tools/check_launcher_package.py --launcher "$installed/Elyhorizon.app/Contents/MacOS/horizon-launcher" --client "$installed/Elyhorizon.app/Contents/MacOS/horizon-client" --client-id "$expected"
       - name: Checksum macOS release files
         run: |
           cd dist

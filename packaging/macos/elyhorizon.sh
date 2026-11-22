@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Build the fork's complete app bundle on macOS, without upstream signing infrastructure.
 # Usage: elyhorizon.sh LAUNCHER CLIENT VERSION OUTDIR arm64|x64
-# CLIENT is a bare game, not the one the game runs from: Contents/MacOS is sealed as it ships, so
-# the launcher stages the game into the version's own Horizon.app instead, which links its
-# companions (game_app::ensure_game). Nothing beside the game travels in this bundle; a Linux or
-# Windows package is the one that must carry horizon-wasm-std.wasm beside the game.
+# CLIENT is a bare game, not the one the game runs from: Contents/MacOS is sealed as it ships, and
+# a file there that is not one of the two programs cannot be signed in a way the ZIP keeps, so the
+# launcher stages the game into the version's own Horizon.app instead, which links its companions
+# (game_app::ensure_game). This bundle carries the two programs and nothing else; a Linux or
+# Windows package is the one that must carry horizon-wasm-std.wasm and .installed beside the game
+# (backend::bundled_client, holder::lease_paths).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 launcher=$1
@@ -48,12 +50,14 @@ plutil -lint "$app/Contents/Info.plist"
 # Sign nested executables first, then seal the app. No credentials are needed for ad hoc signatures.
 codesign --force --sign - "$app/Contents/MacOS/horizon-client"
 codesign --force --sign - "$app/Contents/MacOS/horizon-launcher"
-# The game shipped in the bundle is started from Contents/MacOS, and the run holder opens
-# that folder's completion marker before it starts it (horizon-mod-package
-# holder::lease_paths). The deep sign below seals this zero-length file as a nested
-# component, so it must be written now, after the binaries and before the seal: without
-# it a play from the bundle is refused. It is never rewritten, and it must stay empty.
-: > "$app/Contents/MacOS/.installed"
+# Write nothing else into Contents/MacOS before the seal. The deep sign below seals a nested
+# component there with the only signature codesign can give a file that is not code: a detached one
+# in the file's extended attributes. The ZIP is made with --noextattr to keep AppleDouble entries
+# out of it, so a file that needs one makes the extracted bundle fail
+# `codesign --verify --deep --strict` with "code object is not signed at all". The run holder needs
+# no completion marker here either: the game never runs from this folder (backend::client_program
+# stages the shipped game into the version's own Horizon.app), and the installation the holder
+# leases is the version folder, which the launcher marked when it installed it (backend::COMPLETE).
 codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
 "$app/Contents/MacOS/horizon-launcher" --version

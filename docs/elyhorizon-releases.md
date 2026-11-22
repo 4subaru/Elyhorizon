@@ -97,15 +97,21 @@ separate component), downloads it with
 `packaging/macos/elyhorizon.sh` checks both Mach-O architectures, creates
 `Elyhorizon.app` with the launcher and matching client in `Contents/MacOS`, adds
 licenses and the icon, then signs nested binaries and the bundle ad hoc. A sealed
-`Contents/MacOS` can carry no companion files, so the bundle holds the two
-programs only: at play time the launcher stages the shipped game into the
-version's own `Horizon.app`, which links the companions the game reads beside
+`Contents/MacOS` can carry no companion files: a file there that is not code keeps
+the only signature codesign can give it in an extended attribute, which the
+`--noextattr` ZIP drops, so the extracted bundle then fails
+`codesign --verify --deep --strict` ("code object is not signed at all"). The
+bundle therefore holds the two programs only, neither `horizon-wasm-std.wasm` nor
+the `.installed` marker: at play time the launcher stages the shipped game into
+the version's own `Horizon.app`, which links the companions the game reads beside
 itself - the version's `horizon-wasm-std.wasm`, the native receipt and the native
-directories - from the version folder (`game_app::ensure_game`). It emits
-a ZIP and a DMG with an Applications link. The workflow mounts the DMG read-only,
-copies the app into a temporary installation folder, verifies signatures and
-executable contents, and checks embedded PKCE configuration without runtime Ely
-variables. Publication waits for both Mac architectures, Windows and Linux.
+directories - from the version folder (`game_app::ensure_game`), and the run
+holder leases that version folder, which the launcher marked when it installed
+it. It emits a ZIP and a DMG with an Applications link. The workflow mounts the
+DMG read-only, copies the app into a temporary installation folder, verifies the
+signatures of both the mounted installation and the ZIP's own copy, and checks
+embedded PKCE configuration without runtime Ely variables. Publication waits for
+both Mac architectures, Windows and Linux.
 
 These packages are **not Apple-notarized** and do not use a Developer ID certificate.
 Gatekeeper may require explicit user approval, for example
