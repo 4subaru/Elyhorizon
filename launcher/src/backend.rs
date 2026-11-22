@@ -2406,13 +2406,18 @@ fn incomplete_or_not_found(
     incomplete: Option<String>,
     download: &str,
 ) -> String {
+    // The refusal is the advice's last bullet whether it carries the bullet itself or is a plain
+    // sentence, so a refusal never glues onto the line before it.
+    let why = download.trim_start_matches("\n  • ");
     match incomplete {
         Some(file) => {
             MOJANG_OFFERED.store(true, std::sync::atomic::Ordering::Relaxed);
-            let why = download.trim_start_matches("\n  • ");
             format!("{} {why}", sources::incomplete(version, &file))
         }
-        None => sources::not_found(version, checked, chosen) + download,
+        None => format!(
+            "{}\n  • {why}",
+            sources::not_found(version, checked, chosen)
+        ),
     }
 }
 
@@ -5309,17 +5314,16 @@ mod tests {
             &log,
         )
         .unwrap_err();
-        // Ordinary prepare appends the refusal to the missing-Minecraft diagnostic.
-        let diagnostic = sources::not_found(&pins.version, &[], Path::new("chosen")) + &refused;
-        let (_, remedies) = diagnostic.split_once("\nTo fix it:").unwrap();
-        assert_eq!(
-            remedies,
-            "\n  • Play 26.3 once in the official Minecraft launcher, or in Prism Launcher, \
-             MultiMC, the Modrinth App, ATLauncher, GDLauncher or Dawn Client, then prepare again.\
-             \n  • Or choose the folder where your launcher keeps Minecraft 26.3 (Minecraft \
-             folder › Choose… in the launcher, --minecraft on the command line).\
-             \n  • Sign in with a Microsoft account that owns Minecraft: Java Edition to download \
-             26.3 from Mojang."
+        // Ordinary prepare appends the refusal to the missing-Minecraft diagnostic: it is that
+        // advice's last bullet, in the launcher's own words, never glued onto the line before it.
+        let diagnostic =
+            incomplete_or_not_found(&pins.version, &[], Path::new("chosen"), None, &refused);
+        assert!(
+            diagnostic.ends_with(
+                "\n  • Sign in with Ely.by or a Microsoft account that owns Minecraft to install \
+                 game files automatically."
+            ),
+            "{diagnostic}"
         );
         let no_owner = || Ok(account::Launch::default());
         for (pass, signed_in) in [
@@ -5441,10 +5445,28 @@ pub fn {f}("
 
     #[test]
     fn authenticated_ely_downloads_and_verifies_the_complete_game_layout() {
-        const MANIFEST: &[u8] = br#"{"id":"26.3","downloads":{"client":{"url":"https://example.test/client.jar","sha1":"7e13af1920ce1426d28a6938b40e9fbcdbe81822","size":14}},"libraries":[],"assetIndex":{"id":"empty","url":"https://example.test/assets.json","sha1":"62ea787c1f800c091b98678b050453a5ae59d7bc","size":14}}"#;
+        use crate::downloads::tests::Server;
+        // The game's own files come over HTTP, through the shared download engine, which has no
+        // injectable fetch: the test serves them itself, as the engine's own test does. Only the
+        // version file goes through the injected `fetch`, which is what production does too.
+        let jar = b"fixture-client".to_vec();
+        let index = br#"{"objects":{}}"#.to_vec();
+        let jar_server = crate::downloads::run(Server::new(jar.clone(), std::time::Duration::ZERO));
+        let index_server =
+            crate::downloads::run(Server::new(index.clone(), std::time::Duration::ZERO));
+        let sha1 = crate::sources::sha1_hex;
+        let manifest = format!(
+            r#"{{"id":"26.3","downloads":{{"client":{{"url":"{jar_url}/client.jar","sha1":"{jar_sha1}","size":{jar_size}}}}},"libraries":[],"assetIndex":{{"id":"empty","url":"{index_url}/assets.json","sha1":"{index_sha1}","size":{index_size}}}}}"#,
+            jar_url = jar_server.url,
+            jar_sha1 = sha1(&jar),
+            jar_size = jar.len(),
+            index_url = index_server.url,
+            index_sha1 = sha1(&index),
+            index_size = index.len(),
+        );
         let dir = std::env::temp_dir().join(format!("ely-download-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let pins = sources::Pins::for_version("26.3", "02fa1e9c69fde68cbf336a5105952e3db90573aa");
+        let pins = sources::Pins::for_version("26.3", &sha1(manifest.as_bytes()));
         let account = account::Account {
             uuid: "ely:ffc8fdc95824509e8a57c99b940fb996".into(),
             name: "ElyPlayer".into(),
@@ -5456,13 +5478,9 @@ pub fn {f}("
         };
         let fetch = |url: &str| -> Result<Vec<u8>, String> {
             if url.ends_with("/26.3.json") {
-                Ok(MANIFEST.to_vec())
-            } else if url == "https://example.test/client.jar" {
-                Ok(b"fixture-client".to_vec())
-            } else if url == "https://example.test/assets.json" {
-                Ok(br#"{"objects":{}}"#.to_vec())
+                Ok(manifest.clone().into_bytes())
             } else {
-                panic!("Unexpected download {url}")
+                panic!("the version file is all `fetch` serves: {url}")
             }
         };
         let pass = || account::Launch {
@@ -5481,21 +5499,15 @@ pub fn {f}("
         )
         .is_err());
         download_for(&pins, &dir, Ok(pass()), true, &fetch, &|_| {}).unwrap();
-        assert_eq!(
-            fs::read(dir.join("versions/26.3/26.3.jar")).unwrap(),
-            b"fixture-client"
-        );
+        assert_eq!(fs::read(dir.join("versions/26.3/26.3.jar")).unwrap(), jar);
         assert_eq!(
             fs::read(dir.join("assets/indexes/empty.json")).unwrap(),
-            br#"{"objects":{}}"#
+            index
         );
         // A damaged cached JAR is checked and fetched again, rather than trusted.
         fs::write(dir.join("versions/26.3/26.3.jar"), b"damaged").unwrap();
         download_for(&pins, &dir, Ok(pass()), true, &fetch, &|_| {}).unwrap();
-        assert_eq!(
-            fs::read(dir.join("versions/26.3/26.3.jar")).unwrap(),
-            b"fixture-client"
-        );
+        assert_eq!(fs::read(dir.join("versions/26.3/26.3.jar")).unwrap(), jar);
         fs::remove_dir_all(dir).unwrap();
     }
 

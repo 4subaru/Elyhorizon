@@ -13,8 +13,10 @@ struct State {
     requests: Mutex<Vec<Request>>,
     faults: AtomicUsize,
 }
-struct Server {
-    url: String,
+/// A single-body HTTP server on a port of its own, for tests that need the engine to download:
+/// `url` answers every path with `data`, except the fault paths the engine's own tests use.
+pub(crate) struct Server {
+    pub(crate) url: String,
     state: Arc<State>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -24,7 +26,7 @@ impl Drop for Server {
     }
 }
 impl Server {
-    async fn new(data: Vec<u8>, delay: Duration) -> Self {
+    pub(crate) async fn new(data: Vec<u8>, delay: Duration) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let state = Arc::new(State::default());

@@ -261,7 +261,7 @@ fn a_404_is_not_retried_on_the_mirror() {
         |_| Answer::Failed("offline".into()),
     )
     .unwrap_err();
-    assert!(error.contains("answered 500"), "{error}");
+    assert!(error.contains("returned HTTP 500"), "{error}");
     let _ = fs::remove_dir_all(cache);
 }
 

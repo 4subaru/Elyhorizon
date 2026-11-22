@@ -1006,4 +1006,4 @@ impl Drop for BatchPending {
 
 #[cfg(test)]
 #[path = "downloads/tests.rs"]
-mod tests;
+pub(crate) mod tests;
