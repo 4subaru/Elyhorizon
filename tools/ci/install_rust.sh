@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage: tools/ci/install_rust.sh [PACKAGE...]
-# A verify part's setup: the stable toolchain with rustfmt and clippy and, on Blacksmith's runners (HOSTED=true), the
-# Debian packages named. The two run side by side: one after the other they took ~14 s of each Rust part (2026-11-20:
+# A verify part's setup: the stable toolchain with rustfmt and clippy and, on a runner without them already installed
+# (HOSTED=true: Blacksmith's or GitHub's own; our checks runners have them), the Debian packages named. The two run side by side: one after the other they took ~14 s of each Rust part (2026-11-20:
 # apt ~7.5 s, rustup ~6.5 s). `apt-get update` stays: the image's package lists name the libudev-dev that matches its
 # own libudev1, and the mirror had already dropped that version (#18843).
 # Each apt-get is bounded (APT_TIMEOUT seconds, 300 by default; the tests shorten it), so a stalled mirror can't use up

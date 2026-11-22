@@ -154,15 +154,17 @@ BUILDS = re.compile(r"\bcargo (\+\S+ )?(build|test|check|clippy|rustc|run|doc)\b
 
 
 class BlacksmithBuildFolderTests(unittest.TestCase):
-    def test_every_verify_build_on_blacksmith_restores_its_own_disk_first(self):
+    def test_every_verify_build_that_mounts_a_disk_restores_it_first(self):
         # A build before the restore would compare against checkout dates and trust another tree's artifacts' dates;
         # two jobs on one disk would each replace the other's build.
+        # The jobs are found by their mount, not by their runner's label: this fork falls back to GitHub's own runner,
+        # where the mount (gated on runner.name) is skipped and the build goes to ./target in the checkout.
         jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
         keys, commits = [], []
         for name, job in jobs.items():
             steps = job.get("steps", [])
             builds = [i for i, step in enumerate(steps) if BUILDS.search(step.get("run", ""))]
-            if not builds or "blacksmith-" not in str(job.get("runs-on")):
+            if not builds or not any(step.get("uses", "").startswith("useblacksmith/stickydisk@") for step in steps):
                 continue
             with self.subTest(job=name):
                 mount = next(i for i, step in enumerate(steps)

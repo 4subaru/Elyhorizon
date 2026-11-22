@@ -29,9 +29,11 @@ WINDOWS_WASM_JOB = "verify-windows-wasm-cache"
 VERIFY_NEEDS = (*VERIFY_PARTS, WINDOWS_WASM_JOB)
 # On Windows the bash on PATH is Git's; a bare "bash" there would be WSL's (tests/test_pr_ready.py).
 BASH = shutil.which("bash")
-# verify's parts: our checks runners only with SELF_HOSTED_CI=all, Blacksmith's otherwise.
+# verify's parts: our checks runners only with SELF_HOSTED_CI=all, a hosted one otherwise. `ubuntu-latest` is this
+# fork's: it has no Blacksmith minutes, so its fallback is GitHub's own runner (the whole job, Blacksmith's addition
+# to it gated on runner.name, then simply does not run). Upstream's `blacksmith-\d+vcpu-ubuntu-2404` stays accepted.
 ONLY_WITH_ALL = re.compile(r"^\$\{\{ vars\.SELF_HOSTED_CI == 'all' && fromJSON\('\[\"self-hosted\", \"linux\", "
-                           r"\"horizon-checks\"\]'\) \|\| 'blacksmith-\d+vcpu-ubuntu-2404' \}\}$")
+                           r"\"horizon-checks\"\]'\) \|\| '(?:blacksmith-\d+vcpu-ubuntu-2404|ubuntu-latest)' \}\}$")
 TRUSTED_WRITES = re.compile(r"^\s*(contents|actions|packages|id-token|deployments|attestations): write", re.M)
 # actions: write can start workflows too; cancel-on-close needs it to cancel runs and runs no checkout at all.
 CANCELS_RUNS = {"cancel-on-close.yml cancel"}

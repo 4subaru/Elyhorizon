@@ -13,7 +13,7 @@ permissions:
   contents: read
 jobs:
   close:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read

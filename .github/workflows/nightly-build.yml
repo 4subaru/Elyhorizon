@@ -400,7 +400,7 @@ jobs:
     needs: [pick, build, sdk, sdk-publish, sdk-index, sign, publish]
     if: always() && inputs.issue != '' && needs.pick.result == 'success'
     # One comment, no checkout and no secret: one of our small runners (label horizon-light, docs/ci-runners.md).
-    runs-on: ${{ vars.SELF_HOSTED_CI != 'off' && fromJSON('["self-hosted", "linux", "horizon-light"]') || 'blacksmith-2vcpu-ubuntu-2404' }}
+    runs-on: ${{ vars.SELF_HOSTED_CI != 'off' && fromJSON('["self-hosted", "linux", "horizon-light"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       issues: write

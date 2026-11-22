@@ -45,6 +45,12 @@ included, the whole merge queue and main's pushes: ~100 runs an hour on 2026-11-
 runners could take. They are GitHub's image on faster machines, outside GitHub's 20-job pool, so `verify` is one job
 per part, side by side, each on a size that fits it:
 
+The Elyhorizon fork is not on Blacksmith and registers no runner of its own, so its copy points every one of those
+fallbacks at GitHub's own runner (`|| 'ubuntu-latest'`, and `install_rust.sh`'s `HOSTED` also true there, since
+GitHub's image lacks the ALSA and udev headers too). Everything Blacksmith adds is gated on `runner.name` — the
+sticky disk, `build_folder.sh`, mold — so on GitHub's runner each part just builds into `./target` in its checkout.
+The upstream labels stay in the same expressions, so wiring Blacksmith up later is a one-line revert per job.
+
 | Job | Runner | Merge queue |
 | --- | --- | --- |
 | `verify (which parts run)` (`verify-scope`): `tools/ci/rust_changes.py`'s answers for the launcher and Rust parts, so a change that doesn't reach a part never starts its runner | 2 vCPU | yes |
