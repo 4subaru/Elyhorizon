@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Сборка Elyhorizon"></a>
+  <a href="https://github.com/4subaru/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/4subaru/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Сборка Elyhorizon"></a>
   <img src="https://img.shields.io/badge/Windows-x64-5b3fd6" alt="Windows x64">
   <img src="https://img.shields.io/badge/Linux-x86__64-208260" alt="Linux x86_64">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-555555" alt="macOS Apple Silicon и Intel">
@@ -23,10 +23,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kkerneldev/Elyhorizon/releases"><b>Скачать установщик</b></a> ·
+  <a href="https://github.com/4subaru/Elyhorizon/releases"><b>Скачать установщик</b></a> ·
   <a href="docs/elyby-account.md"><b>Настройка Ely.by</b></a> ·
   <a href="docs/elyhorizon-releases.md"><b>Сборка релиза</b></a> ·
-  <a href="https://github.com/kkerneldev/Elyhorizon/issues"><b>Сообщить об ошибке</b></a> ·
+  <a href="https://github.com/4subaru/Elyhorizon/issues"><b>Сообщить об ошибке</b></a> ·
   <a href="https://github.com/horizon-rust/horizon"><b>Оригинальный Horizon</b></a>
 </p>
 
@@ -90,7 +90,7 @@ runner'ы macOS 15; совместимость со старыми версия�
 
 ### Windows
 
-1. Открой [Releases этого форка](https://github.com/kkerneldev/Elyhorizon/releases).
+1. Открой [Releases этого форка](https://github.com/4subaru/Elyhorizon/releases).
 2. Скачай **`Elyhorizon-<версия>-windows-x64-setup.exe`**.
 3. Запусти установщик, выбери папку и при желании добавь ярлык на рабочий стол.
 4. Открой **Elyhorizon** из меню «Пуск», добавь аккаунт Ely.by и выбери его перед запуском.
@@ -186,7 +186,7 @@ Ely.by отвечает за аккаунты и текстуры. Файлы Mi
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```sh
-git clone https://github.com/kkerneldev/Elyhorizon.git
+git clone https://github.com/4subaru/Elyhorizon.git
 cd Elyhorizon
 cargo build --release --locked -p horizon-official --bin horizon-official
 cp target/release/horizon-official target/release/horizon-client
@@ -202,7 +202,7 @@ cargo build --manifest-path launcher/Cargo.toml --release --locked --bin horizon
 ## Ошибки и участие
 
 Проблемы со входом Ely.by, установщиком и изменениями этого форка можно описать
-в [Issues Elyhorizon](https://github.com/kkerneldev/Elyhorizon/issues).
+в [Issues Elyhorizon](https://github.com/4subaru/Elyhorizon/issues).
 Укажи версию сборки, действие, после которого возникает ошибка, и текст сообщения.
 Пароли, токены и секрет OAuth-приложения в отчёт не добавляй.
 
@@ -213,7 +213,7 @@ cargo build --manifest-path launcher/Cargo.toml --release --locked --bin horizon
 ## Авторы и лицензия
 
 - **Horizon** — исходный проект [Ludovic Marie](https://github.com/ludovic111) и [участников Horizon](https://github.com/horizon-rust/horizon/graphs/contributors).
-- **Elyhorizon** — [этот форк](https://github.com/kkerneldev/Elyhorizon), поддержка Ely.by и собственная Windows-сборка.
+- **Elyhorizon** — [этот форк](https://github.com/4subaru/Elyhorizon), поддержка Ely.by и собственная Windows-сборка.
 - **Ely.by** — [сервис аккаунтов и скинов](https://ely.by), используемый интеграцией.
 
 Исходный код распространяется по [GNU LGPL версии 3 или новее](LICENSE) — это

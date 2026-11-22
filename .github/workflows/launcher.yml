@@ -245,7 +245,7 @@ jobs:
           fi
       # Every test target (the library, the binary, tests/), on each system the launcher ships for.
       - name: Verify Elyhorizon public Desktop registration
-        if: github.repository == 'kkerneldev/Elyhorizon'
+        if: github.repository == '4subaru/Elyhorizon'
         run: |
           if [[ "$RUNNER_OS" == Windows ]]; then python ../tools/check_ely_oauth.py
           else python3 ../tools/check_ely_oauth.py; fi
@@ -299,7 +299,7 @@ jobs:
           expected="${HORIZON_LAUNCHER_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
           [[ "$out" == "horizon-launcher $expected" ]] || { echo "::error::expected horizon-launcher $expected"; exit 1; }
       - name: Public Ely.by configuration survives removal of the build environment
-        if: github.repository == 'kkerneldev/Elyhorizon'
+        if: github.repository == '4subaru/Elyhorizon'
         run: |
           expected="$HORIZON_ELY_CLIENT_ID"
           export HORIZON_LAUNCHER_HOME="${RUNNER_TEMP//\\//}/ely-public-config-$RANDOM"

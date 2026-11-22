@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Elyhorizon release build"></a>
+  <a href="https://github.com/4subaru/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/4subaru/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Elyhorizon release build"></a>
   <img src="https://img.shields.io/badge/Windows-x64-5b3fd6" alt="Windows x64">
   <img src="https://img.shields.io/badge/Linux-x86__64-208260" alt="Linux x86_64">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-555555" alt="macOS Apple Silicon and Intel">
@@ -23,11 +23,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kkerneldev/Elyhorizon/releases"><b>Download</b></a> ·
+  <a href="https://github.com/4subaru/Elyhorizon/releases"><b>Download</b></a> ·
   <a href="#download-and-install"><b>Install</b></a> ·
   <a href="docs/elyby-account.md"><b>Ely.by setup</b></a> ·
   <a href="docs/elyhorizon-releases.md"><b>Build a release</b></a> ·
-  <a href="https://github.com/kkerneldev/Elyhorizon/issues"><b>Report an issue</b></a> ·
+  <a href="https://github.com/4subaru/Elyhorizon/issues"><b>Report an issue</b></a> ·
   <a href="https://playhorizon.dev/docs/"><b>Upstream docs</b></a>
 </p>
 
@@ -94,7 +94,7 @@ must also be verified on the target machine.
 
 ### Windows
 
-1. Open [this fork's Releases](https://github.com/kkerneldev/Elyhorizon/releases).
+1. Open [this fork's Releases](https://github.com/4subaru/Elyhorizon/releases).
 2. Download **`Elyhorizon-<version>-windows-x64-setup.exe`**.
 3. Run the installer, choose a folder, and optionally add a desktop shortcut.
 4. Open **Elyhorizon** from the Start menu, add your Ely.by account, and select it before playing.
@@ -195,7 +195,7 @@ described in the [client documentation](docs/native-client.md) and
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```sh
-git clone https://github.com/kkerneldev/Elyhorizon.git
+git clone https://github.com/4subaru/Elyhorizon.git
 cd Elyhorizon
 cargo build --release --locked -p horizon-official --bin horizon-official
 cp target/release/horizon-official target/release/horizon-client
@@ -211,7 +211,7 @@ the ignored `.local/` directory; never add them to the repository.
 ## Issues and contributions
 
 Report problems with Ely.by sign-in, the installer, or changes in this fork in
-[Elyhorizon Issues](https://github.com/kkerneldev/Elyhorizon/issues).
+[Elyhorizon Issues](https://github.com/4subaru/Elyhorizon/issues).
 Include the build version, the action that triggered the issue, and the error
 message. Do not include passwords, tokens, or the OAuth application secret.
 
@@ -247,7 +247,7 @@ Upstream engine documentation: [Horizon](https://github.com/horizon-rust/horizon
 ## Credits and license
 
 - **Horizon** is the original project by [Ludovic Marie](https://github.com/ludovic111) and [Horizon contributors](https://github.com/horizon-rust/horizon/graphs/contributors).
-- **Elyhorizon** is [this fork](https://github.com/kkerneldev/Elyhorizon), adding Ely.by support and its own Windows distribution.
+- **Elyhorizon** is [this fork](https://github.com/4subaru/Elyhorizon), adding Ely.by support and its own Windows distribution.
 - **Ely.by** is the [account and skin service](https://ely.by) used by the integration.
 
 Source code is distributed under the [GNU LGPL, version 3 or later](LICENSE), for
