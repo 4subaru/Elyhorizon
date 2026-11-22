@@ -3121,6 +3121,15 @@ fn bundled_client(tag: &str, version: &Path, executable_dir: &Path) -> Option<Pa
     if !bundled.is_file() {
         return None;
     }
+    // The run holder starts the game in the folder it ships in and opens that folder's
+    // completion marker (holder::lease_paths treats a folder outside the launcher's data
+    // as a complete installation). Never hand it one that cannot carry the marker - a
+    // macOS app bundle's Contents/MacOS, unless packaging writes the marker before
+    // sealing the bundle (packaging/macos/elyhorizon.sh): the launch would be refused.
+    // The version's own game runs instead.
+    if !executable_dir.join(COMPLETE).is_file() {
+        return None;
+    }
     let installed = read_json(&version.join("research-lock.json"))?;
     let expected: serde_json::Value =
         serde_json::from_str(include_str!("../../research-lock.json")).ok()?;
@@ -8647,6 +8656,7 @@ fn a_matching_bundled_game_is_used_without_replacing_custom_or_incompatible_buil
     fs::create_dir_all(&version).unwrap();
     fs::create_dir_all(&bundled).unwrap();
     fs::write(bundled.join(CLIENT), b"local game fixture").unwrap();
+    fs::write(bundled.join(COMPLETE), b"").unwrap();
     fs::write(
         version.join("research-lock.json"),
         include_bytes!("../../research-lock.json"),
@@ -8656,6 +8666,12 @@ fn a_matching_bundled_game_is_used_without_replacing_custom_or_incompatible_buil
         bundled_client("nightly-2026-11-03-f42ef42", &version, &bundled),
         Some(bundled.join(CLIENT))
     );
+    // A shipping folder the run holder would refuse for its missing completion marker is
+    // not used: the version's own game runs.
+    let unmarked = root.join("unmarked");
+    fs::create_dir_all(&unmarked).unwrap();
+    fs::write(unmarked.join(CLIENT), b"local game fixture").unwrap();
+    assert!(bundled_client("nightly-test", &version, &unmarked).is_none());
     for custom in ["native-test", "imported-2026-11-03-test"] {
         assert!(bundled_client(custom, &version, &bundled).is_none());
     }

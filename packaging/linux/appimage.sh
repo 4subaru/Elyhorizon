@@ -39,6 +39,10 @@ chmod 755 "$appdir/usr/bin/horizon-launcher"
 if [[ -n "$client" ]]; then
   cp "$client" "$appdir/usr/bin/horizon-client"
   chmod 755 "$appdir/usr/bin/horizon-client"
+  # The game is started from this folder inside the image, and the run holder opens its
+  # completion marker before it starts it (horizon-mod-package holder::lease_paths):
+  # without it a play from the image is refused. The image is read-only at run time.
+  : > "$appdir/usr/bin/.installed"
   mkdir -p "$appdir/usr/share/doc/elyhorizon"
   cp "$here/../../LICENSE" "$here/../../THIRD_PARTY_NOTICES.md" "$here/../../docs/elyby-account.md" "$appdir/usr/share/doc/elyhorizon/"
 fi

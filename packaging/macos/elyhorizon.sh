@@ -44,6 +44,12 @@ plutil -lint "$app/Contents/Info.plist"
 # Sign nested executables first, then seal the app. No credentials are needed for ad hoc signatures.
 codesign --force --sign - "$app/Contents/MacOS/horizon-client"
 codesign --force --sign - "$app/Contents/MacOS/horizon-launcher"
+# The game shipped in the bundle is started from Contents/MacOS, and the run holder opens
+# that folder's completion marker before it starts it (horizon-mod-package
+# holder::lease_paths). The deep sign below seals this zero-length file as a nested
+# component, so it must be written now, after the binaries and before the seal: without
+# it a play from the bundle is refused. It is never rewritten, and it must stay empty.
+: > "$app/Contents/MacOS/.installed"
 codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
 "$app/Contents/MacOS/horizon-launcher" --version
