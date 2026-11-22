@@ -661,25 +661,70 @@ jobs:
           PUBLISH: ${{ inputs.publish }}
         with:
           script: |
+            const fs = require('fs');
             const { owner, repo } = context.repo;
             const tag = process.env.TAG;
             const run = await github.rest.actions.getWorkflowRun({
               owner, repo, run_id: Number(process.env.RUN_ID),
             });
-            const sha = run.data.head_sha;
+            const built = run.data.head_sha;
+            // The workflow token carries contents: write, but can never carry the workflow scope
+            // (it is not a permission a workflow token can be granted), and GitHub refuses a ref at
+            // a commit whose change includes a file under .github/workflows without it, with
+            // "Resource not accessible by integration". The tip this run is dispatched from is the
+            // other candidate, and it must contain the built commit, or the release would name
+            // sources that are not the binaries beside it.
+            const candidates = [built, context.sha];
+            const contains = async (sha) => {
+              if (sha === built) return true;
+              const { data } = await github.rest.repos.compareCommits({ owner, repo, base: built, head: sha });
+              return data.status === 'ahead' || data.status === 'identical';
+            };
+            const taggedCommit = async () => {
+              try {
+                return (await github.rest.repos.getCommit({ owner, repo, ref: tag })).data.sha;
+              } catch (error) {
+                if (error.status === 404) return null;
+                throw error;
+              }
+            };
             if (process.env.PUBLISH !== 'true') {
-              core.info(`dry run: ${tag} would be written at ${sha}`);
+              core.info(`dry run: ${tag} would be written at ${built}, or at this run's tip when that cannot carry it`);
               return;
             }
-            try {
-              await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
-            } catch (error) {
-              if (error.status !== 404) throw error;
-              await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha });
+            let chosen = await taggedCommit();
+            if (chosen) {
+              if (!(await contains(chosen))) {
+                throw new Error(`The tag ${tag} points at ${chosen}, which does not contain the built ${built}; choose a new version.`);
+              }
+              core.info(`${tag} already points at ${chosen}`);
             }
-            const commit = await github.rest.repos.getCommit({ owner, repo, ref: tag });
-            if (commit.data.sha !== sha) {
-              throw new Error(`The tag ${tag} points to another commit than the built ${sha}; choose a new version.`);
+            let lastError = null;
+            for (const sha of candidates) {
+              if (chosen) break;
+              if (!sha) continue;
+              if (!(await contains(sha))) {
+                core.warning(`${sha} does not contain the built ${built}; not tagging it`);
+                continue;
+              }
+              try {
+                await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha });
+                chosen = sha;
+                core.info(`wrote ${tag} at ${sha}`);
+              } catch (error) {
+                lastError = error;
+                core.warning(`could not write ${tag} at ${sha}: ${error.message}`);
+              }
+            }
+            if (!chosen) {
+              throw lastError ?? new Error(`Neither ${built} nor this run's tip could carry ${tag}.`);
+            }
+            if (chosen !== built) {
+              core.notice(`${tag} names ${chosen}, this run's tip, which contains the built ${built}: the workflow token cannot tag a commit that changes a workflow file.`);
+              fs.appendFileSync(`${process.env.GITHUB_WORKSPACE}/release-body.md`,
+                `\nThe tag names the commit this was published from, \`${chosen}\`, which contains the built\n` +
+                `commit \`${built}\`: the workflow's own token cannot create a tag at a commit that\n` +
+                `changes a workflow file.\n`);
             }
       - name: Refuse to overwrite an existing release
         if: inputs.publish
