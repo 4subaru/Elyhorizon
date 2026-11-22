@@ -46,9 +46,21 @@ the platforms the run carries, in place of the full per-platform instructions, a
 the release is not marked the repository's latest. An existing tag pointing
 elsewhere, an existing release, and `publish=false` (which downloads, verifies and
 writes the notes but creates no tag and publishes nothing) behave as they do for a
-full build. The tag is written with the workflow's own `GITHUB_TOKEN`, and events
-from that token start no workflow, so publishing does not rebuild what it just
-published.
+full build.
+
+The tag is written with the workflow's own `GITHUB_TOKEN`, and events from that
+token start no workflow, so publishing does not rebuild what it just published.
+That token can hold `contents: write` but never the `workflow` scope - it is not a
+permission a workflow token can be granted - and GitHub refuses to create a ref at a
+commit whose change includes a file under `.github/workflows` without it, answering
+`Resource not accessible by integration`. The commit a publish run built is usually
+the one that changed the release workflow itself, so the job tags the built commit
+when it can and otherwise the tip of the branch it was dispatched from, accepting
+that tip only when it contains the built commit; the release notes say when that
+happened. Dispatch from a branch that contains the built commit, and fast-forward
+the default branch to it first so the release sits where players look for releases.
+An existing tag whose commit does not contain the built commit is refused, as is an
+existing release.
 
 Add `-R <owner>/<repo>` when not running inside the clone.
 
