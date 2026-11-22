@@ -50,6 +50,12 @@ uninstalls it in a temporary folder and checks both executable hashes before pub
 
 The ZIP contains the launcher, matching Horizon client, license notices and setup
 instructions. Keep both executables together to use Ely.by support in Horizon.
+The game runs in the folder it ships in, so the package carries two more files
+beside it: `horizon-wasm-std.wasm`, the shared wasm standard library every wasm
+mod links against, and the run holder's completion marker (`.installed`, empty).
+Without the first the game refuses every wasm mod, without the second a play
+from the installed folder is refused. `tools/check_launcher_package.py
+--require-completion-marker --require-wasm-std` checks both in the workflow.
 Build-only runs expose the same files in the `elyhorizon-windows-x64` artifact.
 Minecraft jars, assets, prepared resources and OAuth secrets are not packaged.
 
@@ -63,7 +69,8 @@ separate build. Graphics drivers, glibc and session/device libraries stay suppli
 by the distribution; other required application libraries are bundled.
 
 Both binaries are shipped inside the same AppImage, so the launcher can find its
-matching client. The workflow tests the archive after extraction, checks embedded
+matching client, with the same two companion files as the Windows ZIP beside it.
+The workflow tests the archive after extraction, checks embedded
 Ely.by configuration in both packages without runtime variables, and compares the
 AppImage's client with the original after applying the same ELF run path change.
 The AppImage can use `--appimage-extract-and-run` without FUSE. Linux artifacts are
@@ -89,7 +96,12 @@ separate component), downloads it with
 
 `packaging/macos/elyhorizon.sh` checks both Mach-O architectures, creates
 `Elyhorizon.app` with the launcher and matching client in `Contents/MacOS`, adds
-licenses and the icon, then signs nested binaries and the bundle ad hoc. It emits
+licenses and the icon, then signs nested binaries and the bundle ad hoc. A sealed
+`Contents/MacOS` can carry no companion files, so the bundle holds the two
+programs only: at play time the launcher stages the shipped game into the
+version's own `Horizon.app`, which links the companions the game reads beside
+itself - the version's `horizon-wasm-std.wasm`, the native receipt and the native
+directories - from the version folder (`game_app::ensure_game`). It emits
 a ZIP and a DMG with an Applications link. The workflow mounts the DMG read-only,
 copies the app into a temporary installation folder, verifies signatures and
 executable contents, and checks embedded PKCE configuration without runtime Ely

@@ -6,6 +6,9 @@
 #
 #   packaging/linux/appimage.sh BINARY VERSION OUTDIR [ELYHORIZON_CLIENT]
 #
+# ELYHORIZON_CLIENT's folder must carry horizon-wasm-std.wasm, the shared library wasm mods link
+# against, beside the game: the image ships it too, and refuses to be built without it.
+#
 # Needs patchelf, and appimagetool: the AppImage project's, 1.9.1 by default, downloaded here and checked against
 # its SHA-256 ($APPIMAGETOOL names one already on the machine, as the .dmg build takes $DMGBUILD).
 # It runs without FUSE (`--appimage-extract-and-run`), so a runner needs none.
@@ -43,6 +46,16 @@ if [[ -n "$client" ]]; then
   # completion marker before it starts it (horizon-mod-package holder::lease_paths):
   # without it a play from the image is refused. The image is read-only at run time.
   : > "$appdir/usr/bin/.installed"
+  # Wasm mods link against the shared standard library the game reads beside its own executable
+  # (horizon-mod-wasm: `current_exe()`), so it belongs in this folder too: without it the game
+  # refuses every wasm mod ("this game has no wasm standard library member"). A release build
+  # puts it beside the game binary (.github/workflows/game-build.yml).
+  wasm_std=$(dirname "$client")/horizon-wasm-std.wasm
+  [[ -s "$wasm_std" ]] || {
+    echo "error: $wasm_std is missing: build it with cargo run --locked -p cargo-horizon-mod -- wasm-std $wasm_std" >&2
+    exit 1
+  }
+  cp "$wasm_std" "$appdir/usr/bin/horizon-wasm-std.wasm"
   mkdir -p "$appdir/usr/share/doc/elyhorizon"
   cp "$here/../../LICENSE" "$here/../../THIRD_PARTY_NOTICES.md" "$here/../../docs/elyby-account.md" "$appdir/usr/share/doc/elyhorizon/"
 fi

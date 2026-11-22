@@ -102,6 +102,14 @@ jobs:
         run: |
           cargo build --release --locked -p horizon-official --bin horizon-official
           Copy-Item target/release/horizon-official.exe target/release/horizon-client.exe -Force
+      - name: Build the shared wasm standard library
+        # Wasm mods are members of one group linked at load, so the game needs the shared standard
+        # library member beside its own executable (horizon-mod-wasm: `current_exe()`); a game
+        # shipped without it refuses every wasm mod. Every release build ships it with the game
+        # (.github/workflows/game-build.yml), so these packages do too. One pinned toolchain builds
+        # it, installed here if the runner lacks it (cargo-horizon-mod/wasm.rs).
+        run: |
+          cargo run --locked -p cargo-horizon-mod -- wasm-std target/release/horizon-wasm-std.wasm
       - name: Check Windows runtime dependencies
         run: |
           python tools/check_imports.py launcher/target/release/horizon-launcher.exe
@@ -115,6 +123,12 @@ jobs:
           New-Item -ItemType Directory -Path $folder -Force | Out-Null
           Copy-Item launcher/target/release/horizon-launcher.exe $folder
           Copy-Item target/release/horizon-client.exe $folder
+          # The game loads the shared wasm standard library beside its own executable, and the run
+          # holder opens the completion marker in the folder it starts the game from
+          # (horizon-mod-package holder::lease_paths, horizon-mod-wasm): both travel beside the
+          # game in every package. The marker is an empty file, never a link.
+          Copy-Item target/release/horizon-wasm-std.wasm $folder
+          New-Item -ItemType File -Path "$folder/.installed" -Force | Out-Null
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, docs/elyby-account.md $folder
           Copy-Item packaging/windows/elyhorizon-readme.txt "$folder/README.txt"
           $archive = "Elyhorizon-$env:VERSION-windows-x64.zip"
@@ -155,7 +169,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $auth.client_id -ne $expectedClientId -or $auth.bundled_client_id -ne $expectedClientId -or $auth.flow -ne 'authorization_code_pkce' -or $auth.client_secret_required -ne $false) {
             throw 'Installed launcher is missing its public PKCE configuration'
           }
-          python tools/check_launcher_package.py --launcher (Join-Path $installed 'horizon-launcher.exe') --client (Join-Path $installed 'horizon-client.exe') --client-id $expectedClientId
+          python tools/check_launcher_package.py --launcher (Join-Path $installed 'horizon-launcher.exe') --client (Join-Path $installed 'horizon-client.exe') --client-id $expectedClientId --require-completion-marker --require-wasm-std
           if ($LASTEXITCODE -ne 0) { throw 'Installed clean-home smoke test failed' }
           $process = Start-Process -FilePath (Join-Path $installed 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -WindowStyle Hidden -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Uninstaller failed: $($process.ExitCode)" }
@@ -246,12 +260,23 @@ jobs:
           cargo build --release --locked -p horizon-official --bin horizon-official
           cp -f target/release/horizon-official target/release/horizon-client
           python tools/check_imports.py target/release/horizon-client
+          # Wasm mods are members of one group linked at load, so the game needs the shared standard
+          # library member beside its own executable (horizon-mod-wasm: `current_exe()`); a game
+          # shipped without it refuses every wasm mod. Every release build ships it with the game
+          # (.github/workflows/game-build.yml), so these packages do too.
+          cargo run --locked -p cargo-horizon-mod -- wasm-std target/release/horizon-wasm-std.wasm
       - name: Package Linux archive and AppImage
         run: |
           set -euo pipefail
           folder=dist/Elyhorizon
           mkdir -p "$folder"
           install -m755 launcher/target/release/horizon-launcher target/release/horizon-client "$folder/"
+          # The game loads the shared wasm standard library beside its own executable, and the run
+          # holder opens the completion marker in the folder it starts the game from
+          # (horizon-mod-package holder::lease_paths, horizon-mod-wasm): both travel beside the
+          # game in every package. The marker is an empty file, never a link.
+          install -m644 target/release/horizon-wasm-std.wasm "$folder/horizon-wasm-std.wasm"
+          : > "$folder/.installed"
           cp LICENSE THIRD_PARTY_NOTICES.md docs/elyby-account.md "$folder/"
           cp packaging/linux/elyhorizon-readme.txt "$folder/README.txt"
           tar -C dist -czf "dist/Elyhorizon-$VERSION-linux-x86_64.tar.gz" Elyhorizon
@@ -282,8 +307,8 @@ jobs:
           cp target/release/horizon-client "$extracted/patched-client"
           patchelf --set-rpath '$ORIGIN/../lib' "$extracted/patched-client"
           cmp "$extracted/patched-client" "$appdir/squashfs-root/usr/bin/horizon-client"
-          python tools/check_launcher_package.py --launcher "$extracted/Elyhorizon/horizon-launcher" --client "$extracted/Elyhorizon/horizon-client" --client-id "$expected"
-          python tools/check_launcher_package.py --launcher "$image" --appimage --client "$appdir/squashfs-root/usr/bin/horizon-client" --client-id "$expected"
+          python tools/check_launcher_package.py --launcher "$extracted/Elyhorizon/horizon-launcher" --client "$extracted/Elyhorizon/horizon-client" --client-id "$expected" --require-completion-marker --require-wasm-std
+          python tools/check_launcher_package.py --launcher "$image" --appimage --client "$appdir/squashfs-root/usr/bin/horizon-client" --client-id "$expected" --require-completion-marker --require-wasm-std
       - name: Check AppImage startup on Arch Linux
         run: |
           set -euo pipefail
@@ -400,6 +425,9 @@ jobs:
           cargo build --manifest-path launcher/Cargo.toml --release --locked --features gpui_platform/runtime_shaders --bin horizon-launcher
           cargo build --release --locked -p horizon-official --bin horizon-official
           cp -f target/release/horizon-official target/release/horizon-client
+          # No wasm standard library member in the app bundle: a sealed Contents/MacOS cannot carry
+          # one, so the launcher stages the game into the version's own Horizon.app, which links the
+          # member the version folder already has (game_app::ensure_game).
       - name: Require system-only dynamic libraries
         run: |
           for binary in launcher/target/release/horizon-launcher target/release/horizon-client; do
@@ -430,7 +458,7 @@ jobs:
           "$installed/Elyhorizon.app/Contents/MacOS/horizon-launcher" --json account ely-status > macos-auth.json
           jq -e --arg id "$expected" '.client_id == $id and .bundled_client_id == $id and .flow == "authorization_code_pkce" and .client_secret_required == false' macos-auth.json
           "$installed/Elyhorizon.app/Contents/MacOS/horizon-client" --help > /dev/null
-          python tools/check_launcher_package.py --launcher "$installed/Elyhorizon.app/Contents/MacOS/horizon-launcher" --client "$installed/Elyhorizon.app/Contents/MacOS/horizon-client" --client-id "$expected"
+          python tools/check_launcher_package.py --launcher "$installed/Elyhorizon.app/Contents/MacOS/horizon-launcher" --client "$installed/Elyhorizon.app/Contents/MacOS/horizon-client" --client-id "$expected" --require-completion-marker
       - name: Checksum macOS release files
         run: |
           cd dist

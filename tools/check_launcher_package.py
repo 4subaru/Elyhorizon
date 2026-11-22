@@ -16,10 +16,26 @@ HOMES = ("HORIZON_HOME", "HORIZON_LAUNCHER_HOME", "XDG_DATA_HOME", "XDG_CONFIG_H
          "HORIZON_LAUNCHER_TRASH", "HORIZON_LAUNCHER_CLIPBOARD", "HORIZON_LAUNCHER_DESKTOP")
 
 
-def check(launcher, client, client_id, appimage=False, run=subprocess.run):
+def check(launcher, client, client_id, appimage=False, require_completion_marker=False,
+          require_wasm_std=False, run=subprocess.run):
     launcher, client = Path(launcher).resolve(), Path(client).resolve()
     if not client_id or not client_id.strip():
         raise ValueError("Expected public Client ID is missing")
+    if require_completion_marker:
+        # A package that ships the game beside the launcher starts it in that folder, and the
+        # run holder opens that folder's completion marker before it starts it (horizon-mod-package
+        # holder::lease_paths). An empty regular file, never a link: without it a play from the
+        # installed package is refused.
+        marker = client.parent / ".installed"
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size:
+            raise ValueError(f"The game's folder has no empty completion marker: {marker}")
+    if require_wasm_std:
+        # Wasm mods are members of one group linked at load, against the shared standard library
+        # the game reads beside its own executable (horizon-mod-wasm, `current_exe()`). Without it
+        # every wasm mod is refused: "this game has no wasm standard library member".
+        std = client.parent / "horizon-wasm-std.wasm"
+        if std.is_symlink() or not std.is_file() or not std.stat().st_size:
+            raise ValueError(f"The game's folder has no wasm standard library: {std}")
     with tempfile.TemporaryDirectory(prefix="elyhorizon-package-") as scratch:
         env = dict(os.environ)
         for key in list(env):
@@ -57,9 +73,14 @@ def main():
     parser.add_argument("--client", required=True)
     parser.add_argument("--client-id", required=True)
     parser.add_argument("--appimage", action="store_true")
+    parser.add_argument("--require-completion-marker", action="store_true",
+                        help="require the empty .installed marker the run holder opens in the game's folder")
+    parser.add_argument("--require-wasm-std", action="store_true",
+                        help="require the shared wasm standard library the game reads in the game's folder")
     args = parser.parse_args()
     try:
-        check(args.launcher, args.client, args.client_id, args.appimage)
+        check(args.launcher, args.client, args.client_id, args.appimage, args.require_completion_marker,
+              args.require_wasm_std)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         print(f"Package verification failed: {error}")
         return 1

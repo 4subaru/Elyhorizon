@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Build the fork's complete app bundle on macOS, without upstream signing infrastructure.
 # Usage: elyhorizon.sh LAUNCHER CLIENT VERSION OUTDIR arm64|x64
+# CLIENT is a bare game, not the one the game runs from: Contents/MacOS is sealed as it ships, so
+# the launcher stages the game into the version's own Horizon.app instead, which links its
+# companions (game_app::ensure_game). Nothing beside the game travels in this bundle; a Linux or
+# Windows package is the one that must carry horizon-wasm-std.wasm beside the game.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 launcher=$1

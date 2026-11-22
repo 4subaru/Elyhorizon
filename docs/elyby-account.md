@@ -103,9 +103,14 @@ is downloaded into the launcher's data directory, verified against its pinned
 SHA-256 on every use, and activated only for Ely sessions.
 
 For Horizon, distribute the updated `horizon-client.exe` beside
-`horizon-launcher.exe`. The launcher selects this bundled client when the
-installed version's Minecraft version and client/server hashes match its pins.
-Imported and native-mod builds retain their own executable. An upstream client
+`horizon-launcher.exe`, with the shared `horizon-wasm-std.wasm` beside the game
+and the run holder's empty `.installed` completion marker: the game runs in the
+folder it ships in and reads both there. The launcher selects this bundled
+client when the installed version's Minecraft version and client/server hashes
+match its pins. Imported and native-mod builds retain their own executable. On
+macOS the bundle's sealed `Contents/MacOS` cannot carry those files, so the
+launcher stages the shipped game into the version's own `Horizon.app`, which
+links the game's companions from the version folder. An upstream client
 without Ely support cannot read an Ely session. Updated Horizon refuses a bad
 session handoff instead of silently starting with a generated offline name.
 

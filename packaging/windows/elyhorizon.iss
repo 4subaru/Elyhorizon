@@ -51,6 +51,12 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#PayloadDir}\horizon-launcher.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\horizon-client.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The folder the launcher starts the game from: the game loads the shared wasm standard library
+; beside its own executable (horizon-mod-wasm: `current_exe()`), and the run holder opens the
+; completion marker there (horizon-mod-package holder::lease_paths). Without them a play from the
+; installed folder is refused, or every wasm mod is.
+Source: "{#PayloadDir}\horizon-wasm-std.wasm"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\.installed"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\elyby-account.md"; DestDir: "{app}"; Flags: ignoreversion

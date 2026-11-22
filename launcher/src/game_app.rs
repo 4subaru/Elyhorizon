@@ -2,7 +2,8 @@
 //! in Cmd+Tab as "horizon-client" with the generic executable icon (winit's window icon does
 //! nothing there). So the launcher starts it from a small Horizon.app inside its version folder:
 //! the Info.plist names it and the icon is the launcher's own. The programs inside are hard links
-//! to the version's, so the bundle takes no disk space and the release's signature is untouched.
+//! to the version's (or to the game a fork's launcher ships, `ensure_game`), so the bundle takes no
+//! disk space and the release's signature is untouched.
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -51,9 +52,19 @@ const INFO_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 /// microphone for voice chat; without the key macOS would kill the game instead of asking).
 const MIC_DESCRIPTION: &str = "__MIC_DESCRIPTION__";
 
-/// Brings `version`'s Horizon.app up to date and returns the game's program inside it. A program
-/// replaced in the version folder (a reinstall, a build copied over) is linked again.
+/// Brings `version`'s Horizon.app up to date and returns the version's own game inside it.
 pub fn ensure(version: &Path) -> io::Result<PathBuf> {
+    ensure_game(version, &version.join(PROGRAMS[0]))
+}
+
+/// The same bundle, starting `game`: the version's own game, or the one a fork's launcher ships
+/// beside itself (`backend::bundled_client`). A game that ships outside a version folder cannot
+/// carry what the launcher generates for it - the native receipt and the native directories - and
+/// a sealed macOS app bundle's `Contents/MacOS` cannot carry the shared wasm standard library
+/// either; the bundle links all of them from the version folder, so the game finds them beside
+/// itself (horizon-mod-wasm, horizon-mod-package). A program replaced in the version folder (a
+/// reinstall, a build copied over) is linked again.
+pub fn ensure_game(version: &Path, game: &Path) -> io::Result<PathBuf> {
     let contents = version.join(APP).join("Contents");
     let programs = contents.join("MacOS");
     fs::create_dir_all(&programs)?;
@@ -70,14 +81,16 @@ pub fn ensure(version: &Path) -> io::Result<PathBuf> {
     write_if_changed(&contents.join("Info.plist"), plist.as_bytes())?;
     write_if_changed(&contents.join("Resources/horizon.icns"), ICON)?;
     for (i, name) in PROGRAMS.into_iter().enumerate() {
-        let (from, to) = (version.join(name), programs.join(name));
+        let versioned = version.join(name);
+        let from = if i == 0 { game } else { versioned.as_path() };
         // Releases before horizon-ctl shipped have only the game.
         if i > 0 && !from.exists() {
             continue;
         }
-        if !same_file(&from, &to) {
+        let to = programs.join(name);
+        if !same_file(from, &to) {
             let _ = fs::remove_file(&to);
-            fs::hard_link(&from, &to)?;
+            fs::hard_link(from, &to)?;
         }
     }
     // Native and wasm builds read their companions beside current_exe(), including on a reused
@@ -292,6 +305,46 @@ mod tests {
         ensure(&version).unwrap();
         assert!(!bundled.exists());
         fs::remove_dir_all(version).unwrap();
+    }
+
+    #[test]
+    fn the_game_shipped_beside_the_launcher_runs_from_the_version_bundle() {
+        let version = native_version("shipped");
+        fs::write(version.join("horizon-wasm-std.wasm"), b"\0asm\x01\0\0\0std").unwrap();
+        fs::write(version.join("native-mods.json"), b"{\"mods\":[]}").unwrap();
+        let shipped = version.join("Contents/MacOS");
+        fs::create_dir_all(&shipped).unwrap();
+        fs::write(shipped.join("horizon-client"), "shipped game").unwrap();
+
+        // The folder a game ships in cannot carry what the launcher generates for it (the native
+        // receipt) or what a sealed bundle cannot hold (the wasm standard library), so the game
+        // runs from the version's bundle, which links them from the version folder.
+        let program = ensure_game(&version, &shipped.join("horizon-client")).unwrap();
+        assert_eq!(
+            program,
+            version.join("Horizon.app/Contents/MacOS/horizon-client")
+        );
+        assert_eq!(fs::read(&program).unwrap(), b"shipped game");
+        assert!(same_file(
+            &version.join("horizon-wasm-std.wasm"),
+            &program.with_file_name("horizon-wasm-std.wasm")
+        ));
+        assert!(same_file(
+            &version.join("native-mods.json"),
+            &program.with_file_name("native-mods.json")
+        ));
+        assert_eq!(
+            fs::read(version.join("horizon-client")).unwrap(),
+            b"unchanged signed game"
+        );
+
+        // A game replaced in the folder it ships in is linked again (installers replace it
+        // atomically, so the old inode is not written through).
+        fs::write(shipped.join("replacement"), "shipped game, updated").unwrap();
+        fs::rename(shipped.join("replacement"), shipped.join("horizon-client")).unwrap();
+        let program = ensure_game(&version, &shipped.join("horizon-client")).unwrap();
+        assert_eq!(fs::read(&program).unwrap(), b"shipped game, updated");
+        fs::remove_dir_all(&version).unwrap();
     }
 
     #[test]

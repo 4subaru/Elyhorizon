@@ -3094,21 +3094,39 @@ pub fn client_command(tag: &str) -> Command {
 }
 
 /// The game's program: on macOS the one inside the version's Horizon.app, so the Dock and Cmd+Tab
-/// show Horizon's name and icon (game_app.rs); the bare binary elsewhere, or if that fails.
+/// show Horizon's name and icon and the game finds its companions beside itself (game_app.rs); the
+/// game a fork's launcher ships, running in the folder it ships in, elsewhere; the bare version
+/// binary if the bundle cannot be brought up to date.
 pub(crate) fn client_program(tag: &str) -> PathBuf {
     let dir = version_dir(tag);
-    if let Some(bundled) = std::env::current_exe()
+    let bundled = std::env::current_exe()
         .ok()
-        .and_then(|exe| bundled_client(tag, &dir, exe.parent()?))
-    {
-        return bundled;
-    }
+        .and_then(|exe| bundled_client(tag, &dir, exe.parent()?));
     #[cfg(target_os = "macos")]
-    match crate::game_app::ensure(&dir) {
-        Ok(program) => return program,
-        Err(e) => eprintln!("Starting the game outside {}: {e}", crate::game_app::APP),
+    {
+        // A macOS app bundle's Contents/MacOS is sealed as it ships: the game must not run from
+        // there, because the folder cannot carry what the game reads beside itself - the native
+        // receipt and native directories the launcher generates, and the shared wasm standard
+        // library. The version's own bundle links all of them (game_app::ensure_game), so the
+        // shipped game is staged into it and runs from there.
+        let game = bundled.unwrap_or_else(|| dir.join(CLIENT));
+        match crate::game_app::ensure_game(&dir, &game) {
+            Ok(program) => program,
+            Err(e) => {
+                eprintln!("Starting the game outside {}: {e}", crate::game_app::APP);
+                dir.join(CLIENT)
+            }
+        }
     }
-    dir.join(CLIENT)
+    #[cfg(not(target_os = "macos"))]
+    {
+        // The game runs in the folder it ships in, whose completion marker the run holder opens;
+        // the package ships it (see `bundled_client`).
+        match bundled {
+            Some(bundled) => bundled,
+            None => dir.join(CLIENT),
+        }
+    }
 }
 
 /// A fork's launcher can ship its matching game beside it. Never substitute it
