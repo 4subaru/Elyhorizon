@@ -2620,31 +2620,24 @@ fn ely_launch_preserves_identity_without_microsoft_ownership_and_keeps_provider_
     };
     let mut accounts = Accounts::default();
     accounts.add(&store, account.clone(), &credential).unwrap();
-    let pass =
-        launch_for_game_with_refresh(&offline(), None, &store, &mut accounts, &|a, s| {
-            Check::Owns(a.clone(), s)
-        })
-        .unwrap();
+    let pass = launch_for_game_with_refresh(&offline(), None, &store, &mut accounts, &|a, s| {
+        Check::Owns(a.clone(), s)
+    })
+    .unwrap();
     assert!(pass.owner.is_none());
     let (played, secret) = pass.session.unwrap();
     assert_eq!(played.uuid, account.uuid);
     assert_eq!(played.name, "ElyPlayer");
     assert!(!secret.owns && secret.ely && secret.minecraft_token == "ely-game-token");
-    let refused = launch_for_game_with_refresh(
-        &offline(),
-        None,
-        &store,
-        &mut accounts,
-        &|_, mut s| {
+    let refused =
+        launch_for_game_with_refresh(&offline(), None, &store, &mut accounts, &|_, mut s| {
             s.sign_in_required = true;
             Check::NoAnswer("Ely.by token exchange returned HTTP 401.".into(), s)
-        },
-    )
-    .unwrap_err();
+        })
+        .unwrap_err();
     assert_eq!(
         refused.to_string(),
         "Ely.by token exchange returned HTTP 401."
     );
     assert_eq!(accounts.selected.as_deref(), Some(account.uuid.as_str()));
 }
-

@@ -731,7 +731,10 @@ class SdkPairTests(unittest.TestCase):
         self.assertFalse(nightly.listed("SHA256SUMS", b"index", sums))
 
     def test_an_sdk_asset_is_trusted_only_under_the_forks_signature_for_its_own_tag(self):
-        command = nightly.signature_check("a" * 40, Path("/tmp/x"), ["sdk.json"])
+        # REPO is GITHUB_REPOSITORY's value, so a fork's CI checks against its own repository: pin it, or the expected
+        # command below would only hold on the repository that is not a fork.
+        with mock.patch.object(nightly.train, "REPO", "horizon-rust/horizon"):
+            command = nightly.signature_check("a" * 40, Path("/tmp/x"), ["sdk.json"])
         self.assertEqual(command[:6], ["cargo", "run", "--locked", "--quiet", "-p", "horizon-release-sign"])
         arguments = command[command.index("--") + 1:]
         self.assertEqual(arguments, ["verify", "--repository", "horizon-rust/horizon", "--tag", "sdk-" + "a" * 40,

@@ -77,10 +77,7 @@ fn permanent_errors_and_long_retry_after_do_not_retry_early() {
         (503, "Content-Length: 0\r\nRetry-After: 120\r\n"),
     ] {
         let (url, server) = server(vec![response(status, headers, "")]);
-        assert!(bytes_with(&url, || request(&url), &|_| panic!(
-            "unexpected retry"
-        ))
-        .is_err());
+        assert!(bytes_with(&url, || request(&url), &|_| panic!("unexpected retry")).is_err());
         assert_eq!(server.join().unwrap().len(), 1);
     }
 }
@@ -137,9 +134,6 @@ fn http_date_retry_after_does_not_get_retried_before_the_server_allows() {
         &format!("Content-Length: 0\r\nRetry-After: {date}\r\n"),
         "",
     )]);
-    assert!(bytes_with(&url, || request(&url), &|_| panic!(
-        "retried too early"
-    ))
-    .is_err());
+    assert!(bytes_with(&url, || request(&url), &|_| panic!("retried too early")).is_err());
     assert_eq!(worker.join().unwrap().len(), 1);
 }

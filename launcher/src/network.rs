@@ -1,9 +1,6 @@
 //! Bounded, credential-safe GET retries. OAuth POSTs deliberately do not use these retries.
 use crate::i18n::trf;
-use std::{
-    io::Read,
-    time::Duration,
-};
+use std::{io::Read, time::Duration};
 
 const ATTEMPTS: usize = 4;
 const MAX_WAIT: Duration = Duration::from_secs(30);
