@@ -26,6 +26,32 @@ contents. No additional PAT or Ely.by secret needs to be added for this workflow
 These launchers do not offer automatic replacement from the upstream launcher
 feed. Run newer Elyhorizon installers from this repository's Releases page.
 
+A platform job stops at its own `timeout-minutes` - 180 for Windows and macOS,
+120 for Linux - and that fails the run before the release job runs, even when the
+other platforms finished and uploaded their artifacts. `publish_run` publishes
+what such a run already built, without compiling anything again: the workflow file
+on the dispatched branch must carry it, and the run's artifacts still be inside
+their 14-day retention.
+
+```sh
+gh workflow run elyhorizon-release.yml -f version=0.2.103 -f publish_run=45049276376
+```
+
+The `publish-existing` job then downloads that run's `elyhorizon-*` artifacts,
+merges their checksum files into one `SHA256SUMS.txt`, verifies every archive
+against it, and publishes them as `elyhorizon-v0.2.103` at the commit that run
+built - not at the tip of the dispatched branch. No platform job starts, so
+nothing is rebuilt and no platform is left half-replaced. Its release notes name
+the platforms the run carries, in place of the full per-platform instructions, and
+the release is not marked the repository's latest. An existing tag pointing
+elsewhere, an existing release, and `publish=false` (which downloads, verifies and
+writes the notes but creates no tag and publishes nothing) behave as they do for a
+full build. The tag is written with the workflow's own `GITHUB_TOKEN`, and events
+from that token start no workflow, so publishing does not rebuild what it just
+published.
+
+Add `-R <owner>/<repo>` when not running inside the clone.
+
 ## Download
 
 The workflow runs launcher and authentication tests, builds both executables
