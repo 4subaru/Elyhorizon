@@ -200,11 +200,12 @@ fn attach(mixer: &Mutex<Mixer>, channel: ChannelId, samples: Samples, looping: b
     }
 }
 /// The open output stream. A build without the `audio` feature (the server build, which must not
-/// need libasound) never has one.
+/// need libasound) never has one: `open_named` only ever returns `Err`, and the unit type keeps
+/// the `Ok` arm in `with_output` ordinary code instead of a branch rustc can see is dead.
 #[cfg(feature = "audio")]
 type Stream = cpal::Stream;
 #[cfg(not(feature = "audio"))]
-type Stream = std::convert::Infallible;
+type Stream = ();
 pub struct Audio {
     _stream: Option<Stream>,
     device_name: String,
