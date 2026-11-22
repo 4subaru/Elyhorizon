@@ -19,7 +19,7 @@
   <img src="https://img.shields.io/badge/Linux-x86__64-208260" alt="Linux x86_64">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-555555" alt="macOS Apple Silicon и Intel">
   <img src="https://img.shields.io/badge/Ely.by-Browser%20OAuth-208260" alt="Вход Ely.by через браузер">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-5b3fd6" alt="Лицензия MIT"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-LGPL--3.0--or--later-5b3fd6" alt="GNU LGPL версии 3 или новее"></a>
 </p>
 
 <p align="center">
@@ -29,6 +29,31 @@
   <a href="https://github.com/kkerneldev/Elyhorizon/issues"><b>Сообщить об ошибке</b></a> ·
   <a href="https://github.com/horizon-rust/horizon"><b>Оригинальный Horizon</b></a>
 </p>
+
+## Что вы получаете
+
+- **Ванильный Minecraft:** выживание, креатив и хардкор во всех измерениях, с тем же
+  рельефом, мобами, жителями и редстоуном. Сохранения открываются как есть.
+- **Аккаунты Ely.by:** вход через системный браузер, выбор аккаунта, свой ник и скин.
+  Для Java-запусков подключается authlib-injector. См. [настройку Ely.by](docs/elyby-account.md).
+- **Мультиплеер:** ванильные и Horizon-серверы, LAN и коды-приглашения, чтобы играть
+  в своём мире с друзьями. Можно и [поднять сервер](docs/hosting.md).
+- **Моды:** собственная система модов Horizon — зум, миникарта, шейдерпаки. Смотри
+  [каталог](https://playhorizon.dev/mods) или [сделай свой мод](docs/mods.md).
+- **Сверх ванили:** прорисовка до 1 024 чанков, HDR, поддержка контроллеров,
+  графические пресеты и динамический свет.
+- **Выделенный сервер:** серверное ПО с высокой производительностью, малым
+  потреблением памяти и почти мгновенным запуском. См.
+  [сравнение серверов](docs/performance/server-vs-vanilla.md).
+
+## Что нужно
+
+- **Своя копия Minecraft: Java Edition.** Elyhorizon не поставляет файлы Minecraft:
+  они собираются из купленной вами игры, поэтому установите версию 26.3 и запустите её один раз.
+- **Аккаунт:** Ely.by или аккаунт Microsoft, которому принадлежит Minecraft. Аккаунты
+  Ely.by подходят для серверов с авторизацией Ely.by.
+- **Windows, macOS или Linux:** Windows x64; macOS 12 или новее на Apple Silicon и Intel;
+  Linux x86-64.
 
 ## Что это за форк
 
@@ -136,11 +161,11 @@ Ely.by отвечает за аккаунты и текстуры. Файлы Mi
 построен этот форк.
 
 <p align="center">
-  <img src="docs/media/launcher-play.webp" alt="Главная страница лаунчера Horizon" width="780">
+  <img src="docs/media/readme/launcher-home.webp" alt="Главная страница лаунчера Horizon" width="780">
 </p>
 
 <p align="center">
-  <img src="docs/media/sunset.webp" alt="Мир Minecraft в Rust-клиенте Horizon: закат над деревней" width="780">
+  <img src="docs/media/readme/sunset.webp" alt="Мир Minecraft в Rust-клиенте Horizon: закат над деревней" width="780">
 </p>
 
 ## Своя сборка в GitHub Actions
@@ -163,12 +188,15 @@ Ely.by отвечает за аккаунты и текстуры. Файлы Mi
 ```sh
 git clone https://github.com/kkerneldev/Elyhorizon.git
 cd Elyhorizon
-cargo build --release --locked -p horizon-client --bin horizon-client
+cargo build --release --locked -p horizon-official --bin horizon-official
+cp target/release/horizon-official target/release/horizon-client
 cargo build --manifest-path launcher/Cargo.toml --release --locked --bin horizon-launcher
 ```
 
-Для установки с поддержкой Ely.by положи собранные `horizon-launcher.exe` и
-`horizon-client.exe` в одну папку. Подготовленные игровые файлы хранятся отдельно
+`horizon-official` — это игра со встроенными частями самого Horizon
+([docs/layers.md](docs/layers.md)); лаунчер и игроки знают её как `horizon-client`.
+Для установки с поддержкой Ely.by положи собранные `horizon-launcher` и
+`horizon-client` в одну папку. Подготовленные игровые файлы хранятся отдельно
 в игнорируемой `.local/`; их нельзя добавлять в репозиторий.
 
 ## Ошибки и участие
@@ -188,7 +216,9 @@ cargo build --manifest-path launcher/Cargo.toml --release --locked --bin horizon
 - **Elyhorizon** — [этот форк](https://github.com/kkerneldev/Elyhorizon), поддержка Ely.by и собственная Windows-сборка.
 - **Ely.by** — [сервис аккаунтов и скинов](https://ely.by), используемый интеграцией.
 
-Исходный код распространяется по [лицензии MIT](LICENSE); зависимости сохраняют
+Исходный код распространяется по [GNU LGPL версии 3 или новее](LICENSE) — это
+относится к исходной работе проекта. Код, вошедший до перехода с MIT, остаётся
+доступным по [лицензии MIT](LICENSES/MIT.txt); зависимости сохраняют
 свои лицензии ([уведомления](THIRD_PARTY_NOTICES.md)). Логотипы Horizon и Ely.by
 принадлежат соответствующим проектам; [источники изображений](docs/media/elyhorizon/README.md).
 
@@ -201,4 +231,4 @@ Microsoft. Код и игровые ресурсы Minecraft не распрос
 [английском README](README.md#project-status). Он описывает набор проверок upstream,
 а не подтверждает каждый сценарий этого форка.
 
-???????? ?????? ?????????, ??????????? ????? ? ??????????? ???????? ??????? ? [???-????? 0.2.2](docs/elyhorizon-0.2.2-verification.md).
+Проверка установки с нуля, диагностика авторизации и текущие ограничения описаны в [чек-листе проверки 0.2.2](docs/elyhorizon-0.2.2-verification.md).

@@ -103,6 +103,13 @@ fn authenticate(
     Ok(with_textures(base, result))
 }
 
+/// Whether `name` can be an offline name: 3 to 16 letters, digits or `_`, as account names are.
+/// An Ely.by profile name follows the same rules, and the game refuses anything else.
+fn valid_offline_name(name: &str) -> bool {
+    (3..=16).contains(&name.chars().count())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn decode(value: &Value, client: &str) -> Result<(Account, Secrets), String> {
     let malformed = || crate::i18n::tr("Could not read the Ely.by profile.").to_owned();
     let token = str_field(value, "accessToken")

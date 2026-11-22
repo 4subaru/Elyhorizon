@@ -1,34 +1,62 @@
 <p align="center"><strong>English</strong> · <a href="README.ru.md">Русский</a></p>
 
 <p align="center">
-  <a href="https://github.com/horizon-rust/horizon"><img src="docs/media/brand/icon.svg" alt="Horizon logo" width="104" height="104"></a>
+  <a href="https://github.com/horizon-rust/horizon"><img src="docs/media/brand/icon.svg" alt="Horizon logo" width="96" height="96"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://ely.by"><img src="docs/media/elyhorizon/elyby-logo.png" alt="Ely.by logo" width="104" height="104"></a>
+  <a href="https://ely.by"><img src="docs/media/elyhorizon/elyby-logo.png" alt="Ely.by logo" width="96" height="96"></a>
 </p>
 
 <h1 align="center">Elyhorizon</h1>
 
 <p align="center">
-  <b>Horizon with Ely.by accounts for Windows, Linux and macOS.</b><br>
-  An independent fork of <a href="https://github.com/horizon-rust/horizon">Horizon</a>, a Minecraft: Java Edition 26.3 client written in Rust.
+  <b>Minecraft 26.3, rewritten from scratch in Rust — with Ely.by accounts.</b><br>
+  An independent fork of <a href="https://github.com/horizon-rust/horizon">Horizon</a>. Play on existing worlds and servers.
 </p>
 
 <p align="center">
-  <a href="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Elyhorizon build"></a>
+  <a href="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml"><img src="https://github.com/kkerneldev/Elyhorizon/actions/workflows/elyhorizon-release.yml/badge.svg" alt="Elyhorizon release build"></a>
   <img src="https://img.shields.io/badge/Windows-x64-5b3fd6" alt="Windows x64">
   <img src="https://img.shields.io/badge/Linux-x86__64-208260" alt="Linux x86_64">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-555555" alt="macOS Apple Silicon and Intel">
   <img src="https://img.shields.io/badge/Ely.by-Browser%20OAuth-208260" alt="Ely.by sign-in through your browser">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-5b3fd6" alt="MIT license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-LGPL--3.0--or--later-5b3fd6" alt="GNU LGPL version 3 or later"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/kkerneldev/Elyhorizon/releases"><b>Download installer</b></a> ·
+  <a href="https://github.com/kkerneldev/Elyhorizon/releases"><b>Download</b></a> ·
+  <a href="#download-and-install"><b>Install</b></a> ·
   <a href="docs/elyby-account.md"><b>Ely.by setup</b></a> ·
   <a href="docs/elyhorizon-releases.md"><b>Build a release</b></a> ·
   <a href="https://github.com/kkerneldev/Elyhorizon/issues"><b>Report an issue</b></a> ·
-  <a href="https://github.com/horizon-rust/horizon"><b>Original Horizon</b></a>
+  <a href="https://playhorizon.dev/docs/"><b>Upstream docs</b></a>
 </p>
+
+<p align="center">
+  <img src="docs/media/readme/hero-lookout.webp" alt="A player's view from a wooden lookout over a village: a friend in diamond armour sneaks at the edge while a creeper flashes white behind her, another friend rides a horse between the houses below, and forest, snowy peaks and the sea run to the horizon" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/media/readme/signs.webp" alt="Three wooden signs: 3.5x faster start than modded Java, 38 percent more FPS than Java with Sodium, and a mod API to port your mods to Rust" width="100%">
+</p>
+
+<p align="center">
+  <sub>*Upstream's measurement against Java Edition with Sodium, Lithium, FerriteCore and ImmediatelyFast on a Ryzen 7 9800X3D with an RTX 5080. More computers on the <a href="https://playhorizon.dev/benchmarks">benchmarks page</a>.</sub>
+</p>
+
+<h2 align="center">What you get</h2>
+
+- **Vanilla Minecraft:** survival, creative and hardcore in every dimension, with the same terrain, mobs, villagers and redstone. Your saves open as they are.
+- **Ely.by accounts:** sign in through your system browser, choose an account, and play with your own name and skin. Java instances get authlib-injector. See [Ely.by setup](docs/elyby-account.md).
+- **Multiplayer:** vanilla and Horizon servers, LAN, and invite codes for playing your world with friends. You can [host a server](docs/hosting.md) too.
+- **Mods:** Horizon's own mod system, with mods like zoom and a minimap, and shader packs. Browse the [catalogue](https://playhorizon.dev/mods) or [make a mod](docs/mods.md).
+- **Beyond vanilla:** terrain up to 1,024 chunks away, HDR, controller support, graphics presets and dynamic lights.
+- **Dedicated server:** server software for high performance, low memory usage, and near instant startup. See [the server benchmark](docs/performance/server-vs-vanilla.md).
+
+<h2 align="center">What you need</h2>
+
+- **Your own copy of Minecraft: Java Edition.** Elyhorizon ships no Minecraft files. It builds them from the game you bought, so install version 26.3 and start it once.
+- **An account:** Ely.by, or a Microsoft account that owns Minecraft. Ely.by accounts work on servers set up for Ely.by authentication.
+- **Windows, macOS or Linux:** Windows on x64, macOS 12 or later on Apple Silicon and Intel, Linux on x86-64.
 
 ## About this fork
 
@@ -134,13 +162,20 @@ Access to servers using Microsoft authentication depends on that server's requir
 These upstream Horizon screenshots show the base interface and game on which
 this fork is built.
 
-<p align="center">
-  <img src="docs/media/launcher-play.webp" alt="Horizon launcher home page" width="780">
-</p>
-
-<p align="center">
-  <img src="docs/media/sunset.webp" alt="Sunset over a village in the Horizon Rust client" width="780">
-</p>
+<table>
+  <tr>
+    <td width="50%" align="center"><img src="docs/media/readme/launcher-home.webp" alt="The launcher's Home page: the selected instance ready to play, the version picker, Join a friend and the instance's tabs"></td>
+    <td width="50%" align="center"><img src="docs/media/readme/launcher-mods.webp" alt="The launcher's Mods page: a catalogue of Horizon mods with their versions and install buttons"></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/media/readme/multiplayer.webp" alt="The multiplayer screen: a list of servers with their ping, player counts and motd"></td>
+    <td width="50%" align="center"><img src="docs/media/readme/survival.webp" alt="Survival gameplay: a player's base at dusk, with a chest, a crafting table and a farm"></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><img src="docs/media/readme/nether.webp" alt="The Nether: a basalt delta with a lava sea and a fortress in the distance"></td>
+    <td width="50%" align="center"><img src="docs/media/readme/sunset.webp" alt="Sunset over a savanna river valley and a plains village"></td>
+  </tr>
+</table>
 
 ## Build a release with GitHub Actions
 
@@ -162,13 +197,16 @@ described in the [client documentation](docs/native-client.md) and
 ```sh
 git clone https://github.com/kkerneldev/Elyhorizon.git
 cd Elyhorizon
-cargo build --release --locked -p horizon-client --bin horizon-client
+cargo build --release --locked -p horizon-official --bin horizon-official
+cp target/release/horizon-official target/release/horizon-client
 cargo build --manifest-path launcher/Cargo.toml --release --locked --bin horizon-launcher
 ```
 
-Place the built `horizon-launcher.exe` and `horizon-client.exe` in the same folder
-to use Ely.by support. Prepared game files are stored separately in the ignored
-`.local/` directory; never add them to the repository.
+`horizon-official` is the game with Horizon's own in-game parts built in
+([docs/layers.md](docs/layers.md)); the launcher and players know it as
+`horizon-client`. Place the built `horizon-launcher` and `horizon-client` in the
+same folder to use Ely.by support. Prepared game files are stored separately in
+the ignored `.local/` directory; never add them to the repository.
 
 ## Issues and contributions
 
@@ -181,18 +219,44 @@ Upstream engine documentation: [Horizon](https://github.com/horizon-rust/horizon
 [architecture](docs/architecture.md), [mods](docs/mods.md),
 [servers](docs/hosting.md), and [horizon-ctl control](docs/agent-control.md).
 
+<h2 align="center">Horizon is made by the Horizon Team</h2>
+
+<table align="center">
+  <tr>
+    <td align="center" width="140"><a href="https://github.com/kacpherek"><img src="https://github.com/kacpherek.png?size=160" width="80" alt="Kacper"><br><b>Kacper</b></a></td>
+    <td align="center" width="140"><a href="https://github.com/Online5277"><img src="https://github.com/Online5277.png?size=160" width="80" alt="Cosmic"><br><b>Cosmic</b></a></td>
+    <td align="center" width="140"><a href="https://github.com/levzzz5154"><img src="https://github.com/levzzz5154.png?size=160" width="80" alt="levzzz"><br><b>levzzz</b></a></td>
+    <td align="center" width="140"><a href="https://github.com/rdbtCVS"><img src="https://github.com/rdbtCVS.png?size=160" width="80" alt="rdbt"><br><b>rdbt</b></a></td>
+    <td align="center" width="140"><a href="https://github.com/dezer-x"><img src="https://github.com/dezer-x.png?size=160" width="80" alt="Anthony S"><br><b>Anthony S</b></a></td>
+    <td align="center" width="140"><a href="https://github.com/NikitaMGrimm"><img src="https://github.com/NikitaMGrimm.png?size=160" width="80" alt="Nikita"><br><b>Nikita</b></a></td>
+    <td align="center" width="140"><a href="https://github.com/ludovic111"><img src="https://github.com/ludovic111.png?size=160" width="80" alt="Ludovic Marie"><br><b>Ludovic Marie</b></a><br><sub>Founder</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  <sub>and everyone who has contributed</sub><br><br>
+  <a href="https://github.com/horizon-rust/horizon/graphs/contributors"><img src="https://contrib.rocks/image?repo=horizon-rust/horizon&max=72&columns=12" alt="Everyone who has contributed to Horizon"></a>
+</p>
+
+<p align="center">
+  <a href="docs/native-client.md#run-from-a-checkout"><b>Build guide</b></a> ·
+  <a href="CONTRIBUTING.md"><b>Contributing</b></a> ·
+  <a href="GOVERNANCE.md"><b>Governance</b></a>
+</p>
+
 ## Credits and license
 
 - **Horizon** is the original project by [Ludovic Marie](https://github.com/ludovic111) and [Horizon contributors](https://github.com/horizon-rust/horizon/graphs/contributors).
 - **Elyhorizon** is [this fork](https://github.com/kkerneldev/Elyhorizon), adding Ely.by support and its own Windows distribution.
 - **Ely.by** is the [account and skin service](https://ely.by) used by the integration.
 
-Source code is distributed under the [MIT license](LICENSE); dependencies retain
-their own licenses ([notices](THIRD_PARTY_NOTICES.md)). Horizon and Ely.by logos
-belong to their respective projects; see [image sources](docs/media/elyhorizon/README.md).
+Source code is distributed under the [GNU LGPL, version 3 or later](LICENSE), for
+the project's original work. Code merged before the move from MIT stays available
+under the [MIT licence](LICENSES/MIT.txt); dependencies retain their own licenses
+([notices](THIRD_PARTY_NOTICES.md)). Horizon and Ely.by logos belong to their
+respective projects; see [image sources](docs/media/elyhorizon/README.md).
 
-Elyhorizon is not an official Minecraft product and is not affiliated with Mojang
-or Microsoft. Minecraft code and game assets are not distributed in this repository.
+<sub>NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT. Minecraft is a trademark of Mojang Synergies AB; its code and assets belong to Mojang and Microsoft under the [Minecraft EULA](https://www.minecraft.net/en-us/eula).</sub>
 
 <details>
 <summary>Upstream Horizon technical audit</summary>

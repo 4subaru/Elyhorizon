@@ -14,11 +14,12 @@ use super::*;
 use gpui::img;
 use horizon_launcher::browser::{
     self,
-    details::{Details, Environment, Filters, Sort, Tags},
+    details::{self, Details, Environment, Filters, Image, Sort, Tags},
     images, java, Kind as PackKind, Project, SourceId, Support, Version,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Category and tag names from Modrinth / CurseForge, present in code so the i18n
@@ -61,6 +62,32 @@ const CATEGORY_NAMES: &[&str] = &[
     "worldgen",
 ];
 
+/// A category's name in the launcher's language: the tables' translation of its words where they
+/// have one (Modrinth's names), else the name playhorizon.dev gives it.
+fn category_name(slug: &str) -> String {
+    if slug
+        .strip_suffix("x-")
+        .is_some_and(|size| size.parse::<u32>().is_ok())
+    {
+        return slug.to_owned();
+    }
+    let words = slug.replace('-', " ");
+    let said = tr(&words);
+    if said == words {
+        return details::category_label(slug);
+    }
+    let mut chars = said.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// One of the registry's tags as a chip shows it.
+fn tag_name(tag: &str) -> String {
+    format!("#{tag}")
+}
+
 /// A project page's tabs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tab {
@@ -78,11 +105,15 @@ const TABS: [(Tab, &str); 3] = [
 /// The open project page.
 pub(super) struct Opened {
     pub(super) project: Project,
+    request: u64,
     tab: Tab,
     details: Option<Result<Arc<Details>, String>>,
     versions: Option<Result<Arc<[ProjectVersion]>, String>>,
+    pub(super) pack_review: Option<Result<browser::installed::PackReview, String>>,
     version_list: cull::Cull,
     checked_versions: HashMap<String, horizon_port_pack::check::Verdict>,
+    /// The gallery image shown large.
+    shot: usize,
 }
 
 /// Cached verdicts are read with the version request, never while drawing a frame.
@@ -96,6 +127,7 @@ pub(super) struct ProjectVersion {
 #[derive(Default)]
 pub(super) struct Browse {
     pub(super) open: Option<Opened>,
+    request: u64,
     pub(super) filters: Filters,
     pub(super) show_filters: bool,
     /// The Sort by dropdown's list is open.
@@ -107,10 +139,21 @@ pub(super) struct Browse {
     image_queue: Option<std::sync::mpsc::Sender<(String, u32)>>,
 }
 
+impl Browse {
+    fn load_versions(&mut self, request: u64, versions: Result<Vec<ProjectVersion>, String>) {
+        if let Some(open) = self.open.as_mut().filter(|o| o.request == request) {
+            open.versions = Some(versions.map(Arc::from));
+            open.apply_checks();
+            open.version_list.reset();
+        }
+    }
+}
+
 /// What the background sends this module.
 pub(super) enum Loaded {
-    Details((SourceId, String), Result<Details, String>),
-    Versions((SourceId, String), Result<Vec<ProjectVersion>, String>),
+    Details((SourceId, String), Result<Arc<Details>, String>),
+    Versions(u64, Result<Vec<ProjectVersion>, String>),
+    PackReview(u64, Result<browser::installed::PackReview, String>),
     Checked(
         (SourceId, String),
         String,
@@ -134,14 +177,13 @@ impl Launcher {
         match loaded {
             Loaded::Details(key, d) => {
                 if let Some(o) = open(b, &key) {
-                    o.details = Some(d.map(Arc::new));
+                    o.details = Some(d);
                 }
             }
-            Loaded::Versions(key, v) => {
-                if let Some(o) = open(b, &key) {
-                    o.versions = Some(v.map(Arc::from));
-                    o.apply_checks();
-                    o.version_list.reset();
+            Loaded::Versions(request, v) => b.load_versions(request, v),
+            Loaded::PackReview(request, review) => {
+                if let Some(o) = b.open.as_mut().filter(|o| o.request == request) {
+                    o.pack_review = Some(review);
                 }
             }
             Loaded::Checked(key, version, verdict) => {
@@ -168,13 +210,27 @@ impl Launcher {
         let key = (project.source, project.id.clone());
         let tx = self.mods.tx.clone();
         let p = project.clone();
+        let needs_review = self.mods.needs_pack_review(&p);
+        let everything = self.mods.everything || self.mods.browse.filters.other_version();
+        self.mods.browse.request += 1;
+        let request = self.mods.browse.request;
         std::thread::spawn(move || {
             let Some(source) = browser::source(p.source) else {
                 return;
             };
-            let d = source.details(&p);
+            let d = source.details(&p).map(Arc::new);
             let _ = tx.send(Event::Loaded(Loaded::Details(key.clone(), d)));
-            let v = source.versions(&p).map(|versions| {
+            let versions = source.versions(&p);
+            if needs_review {
+                let review = versions
+                    .as_ref()
+                    .map_err(String::clone)
+                    .and_then(|versions| {
+                        browser::installed::review_resource_pack(&*source, &p, versions, everything)
+                    });
+                let _ = tx.send(Event::Loaded(Loaded::PackReview(request, review)));
+            }
+            let v = versions.map(|versions| {
                 let home = backend::game_home();
                 versions
                     .into_iter()
@@ -189,16 +245,9 @@ impl Launcher {
                     })
                     .collect()
             });
-            let _ = tx.send(Event::Loaded(Loaded::Versions(key, v)));
+            let _ = tx.send(Event::Loaded(Loaded::Versions(request, v)));
         });
-        self.mods.browse.open = Some(Opened {
-            project,
-            tab: Tab::Description,
-            details: None,
-            versions: None,
-            version_list: cull::Cull::default(),
-            checked_versions: HashMap::new(),
-        });
+        self.mods.browse.open = Some(Opened::new(project, request));
     }
 
     /// The image of `url` at `size` when it is on disk; else asks for it once. One cached longer
@@ -270,7 +319,7 @@ impl Launcher {
 
     /// The values the filters can take for the current kind and source, asked for once.
     fn mods_tags(&mut self) -> Option<&Tags> {
-        let key = (self.mods.source, self.mods.kind);
+        let key = (self.mods.source(), self.mods.kind);
         if self.mods.browse.tags_asked.insert(key) {
             let tx = self.mods.tx.clone();
             std::thread::spawn(move || {
@@ -284,15 +333,14 @@ impl Launcher {
     }
 
     /// Sets the filters and searches again.
-    fn mods_filter(&mut self, change: impl FnOnce(&mut Filters)) {
+    pub(super) fn mods_filter(&mut self, change: impl FnOnce(&mut Filters)) {
         change(&mut self.mods.browse.filters);
         self.mods_search_keeping(0, true);
     }
 
     /// The orders the current source can sort by, "Best match" first.
-    fn mods_sorts(&self) -> Vec<(Option<Sort>, &'static str)> {
-        let own =
-            self.mods.source == SourceId::Horizon && self.mods.java_for(self.mods.kind).is_none();
+    pub(super) fn mods_sorts(&self) -> Vec<(Option<Sort>, &'static str)> {
+        let own = self.mods.source() == SourceId::Horizon;
         let all: &[Sort] = if own {
             &browser::horizon::SORTS
         } else {
@@ -389,7 +437,7 @@ impl Launcher {
                                 || (current.is_some()
                                     && value.is_none()
                                     && !sorts.iter().any(|(v, _)| *v == current)),
-                            |d| d.child(div().size(px(6.)).rounded_full().bg(t.accent)),
+                            |d| d.child(div().size(px(6.)).bg(t.accent)),
                         )
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.mods.browse.sort_menu = false;
@@ -403,14 +451,22 @@ impl Launcher {
         wrap
     }
 
-    /// The filter bar: sort always; loader, version, environment and categories when shown.
+    /// The filter bar: sort always (Horizon's registry has its own bar); loader, version,
+    /// environment and categories when shown, only categories and tags for the registry. While
+    /// the panel is closed, what is picked stays in view as chips that each remove theirs.
     pub(super) fn mods_filters(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let f = self.mods.browse.filters.clone();
         let sorts = self.mods_sorts();
-        let sort = self.mods_sort_dropdown(&sorts, f.sort, cx);
+        let source = self.mods.source();
+        let registry = source == SourceId::Horizon;
+        let resource = source == SourceId::Modrinth && self.mods.kind == PackKind::ResourcePack;
+        let shader = source == SourceId::Modrinth && self.mods.kind == PackKind::Shader;
+        let hide_modded = resource && !self.mods.everything && self.mods.java.is_none();
+        let sort = (!t.glass && !registry).then(|| self.mods_sort_dropdown(&sorts, f.sort, cx));
         let shown = self.mods.browse.show_filters;
         let active = f.categories.len()
+            + f.tags.len()
             + f.loader.is_some() as usize
             + f.game_version.is_some() as usize
             + f.environment.is_some() as usize;
@@ -434,10 +490,13 @@ impl Launcher {
                 .flex_wrap()
                 .items_center()
                 .gap(px(12.))
-                .child(sort)
+                .children(sort)
                 .child(toggle),
         );
         if !shown {
+            if active > 0 {
+                bar = bar.child(self.mods_picked_filters(&f, cx));
+            }
             return bar;
         }
         let Some(tags) = self.mods_tags().cloned() else {
@@ -458,23 +517,28 @@ impl Launcher {
                 .flex_wrap()
                 .items_center()
                 .gap(px(4.))
-                .child(caps(tr(title)).text_color(t.muted).w(px(120.)))
+                .child(caps(title).text_color(t.muted).w(px(120.)))
         };
-        let mut loaders = row("Loader");
+        let mut loaders = row(tr("Loader"));
         for l in &tags.loaders {
             let on = f.loader.as_deref() == Some(l.as_str());
             let value = l.clone();
-            loaders = loaders.child(chip(format!("mods-loader-{l}"), l.clone(), on).on_click(
-                cx.listener(move |this, _: &ClickEvent, _, cx| {
+            loaders = loaders.child(
+                chip(
+                    format!("mods-loader-{l}"),
+                    details::loader_label(l).into(),
+                    on,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     let v = value.clone();
                     this.mods_filter(|f| f.loader = if on { None } else { Some(v) });
                     cx.notify();
-                }),
-            ));
+                })),
+            );
         }
-        let mut versions = row("Game version");
-        if let Some(path) = self.vanilla_icon() {
-            versions = versions.child(img(path).size(px(20.)).flex_none());
+        let mut versions = row(tr("Game version"));
+        if let Some(grass) = self.grass_mark(20.) {
+            versions = versions.child(img(grass).size(px(20.)).flex_none());
         }
         for v in tags.game_versions.iter().take(12) {
             let on = f.game_version.as_deref() == Some(v.as_str());
@@ -487,7 +551,7 @@ impl Launcher {
                 }),
             ));
         }
-        let mut environment = row("Environment");
+        let mut environment = row(tr("Environment"));
         for e in Environment::ALL {
             let on = f.environment == Some(e);
             environment = environment.child(
@@ -499,48 +563,166 @@ impl Launcher {
                 ),
             );
         }
-        let mut categories = row("Categories");
-        for c in &tags.categories {
-            let on = f.categories.contains(&c.name);
-            let value = c.name.clone();
-            categories = categories.child(
-                chip(format!("mods-cat-{}", c.name), c.name.replace('-', " "), on).on_click(
-                    cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        let v = value.clone();
-                        this.mods_filter(|f| {
-                            if !f.categories.contains(&v) {
-                                f.categories.push(v);
-                            } else {
-                                f.categories.retain(|x| *x != v);
-                            }
-                        });
-                        cx.notify();
-                    }),
-                ),
+        let grouped = resource || shader;
+        let mut category_rows = Vec::new();
+        for group in tags
+            .categories
+            .chunk_by(|a, b| !grouped || a.header == b.header)
+        {
+            let title = match group[0].header.as_str() {
+                "features" if grouped => tr("Features"),
+                "resolutions" if grouped => tr("Resolutions"),
+                "performance impact" if grouped => tr("Performance"),
+                "categories" if shader => tr("Style"),
+                _ => tr("Categories"),
+            };
+            let mut categories = div().flex().flex_wrap().gap(px(4.));
+            for c in group
+                .iter()
+                .filter(|c| !(hide_modded && c.name == "modded"))
+            {
+                let on = f.categories.contains(&c.name);
+                let value = c.name.clone();
+                categories = categories.child(
+                    chip(format!("mods-cat-{}", c.name), category_name(&c.name), on).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let v = value.clone();
+                            this.mods_filter(|f| {
+                                if on {
+                                    f.categories.retain(|x| *x != v);
+                                } else {
+                                    f.categories.push(v);
+                                }
+                            });
+                            cx.notify();
+                        }),
+                    ),
+                );
+            }
+            category_rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(caps(title).text_color(t.muted).w(px(120.)).flex_none())
+                    .child(categories.flex_1().min_w_0()),
             );
         }
         let _ = CATEGORY_NAMES;
+        let mut tag_row = row(tr("Tags"));
+        for tag in &tags.tags {
+            let on = f.tags.contains(tag);
+            let value = tag.clone();
+            tag_row = tag_row.child(chip(format!("mods-tag-{tag}"), tag_name(tag), on).on_click(
+                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let v = value.clone();
+                    this.mods_filter(|f| {
+                        if !f.tags.contains(&v) {
+                            f.tags.push(v);
+                        } else {
+                            f.tags.retain(|x| *x != v);
+                        }
+                    });
+                    cx.notify();
+                }),
+            ));
+        }
         let clear = button("mods-clear", "Clear filters", Kind::Ghost, &t).on_click(cx.listener(
             |this, _: &ClickEvent, _, cx| {
                 this.mods_filter(|f| *f = Filters::default());
                 cx.notify();
             },
         ));
-        bar = bar
-            .child(loaders)
-            .child(versions)
-            .child(environment)
-            .child(categories);
+        if !registry {
+            bar = bar
+                .children((!resource && !tags.loaders.is_empty()).then_some(loaders))
+                .children((!shader).then_some(versions))
+                .children((!grouped).then_some(environment));
+        }
+        bar = bar.children(category_rows);
+        if registry && !tags.tags.is_empty() {
+            bar = bar.child(tag_row);
+        }
         if active > 0 {
             bar = bar.child(div().flex().child(clear));
         }
         bar
     }
 
-    /// Vanilla's mark, drawn from the player's prepared game files when there are some.
-    pub(super) fn vanilla_icon(&self) -> Option<PathBuf> {
-        let tag = self.selected().filter(|tag| backend::is_prepared(tag))?;
-        images::grass_block(&backend::game_home(), &backend::resources(tag))
+    /// What the filters pick, each a chip with a cross that removes it, then Clear filters.
+    fn mods_picked_filters(&self, f: &Filters, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        type Remove = Rc<dyn Fn(&mut Filters)>;
+        let mut picked: Vec<(String, String, Remove)> = Vec::new();
+        for c in &f.categories {
+            let v = c.clone();
+            picked.push((
+                format!("cat-{c}"),
+                category_name(c),
+                Rc::new(move |f| f.categories.retain(|x| *x != v)),
+            ));
+        }
+        for tag in &f.tags {
+            let v = tag.clone();
+            picked.push((
+                format!("tag-{tag}"),
+                tag_name(tag),
+                Rc::new(move |f| f.tags.retain(|x| *x != v)),
+            ));
+        }
+        if let Some(l) = &f.loader {
+            picked.push((
+                "loader".into(),
+                details::loader_label(l).into(),
+                Rc::new(|f| f.loader = None),
+            ));
+        }
+        if let Some(v) = &f.game_version {
+            picked.push((
+                "version".into(),
+                v.clone(),
+                Rc::new(|f| f.game_version = None),
+            ));
+        }
+        if let Some(e) = f.environment {
+            picked.push((
+                "env".into(),
+                e.label().into(),
+                Rc::new(|f| f.environment = None),
+            ));
+        }
+        let mut row = div().flex().flex_wrap().items_center().gap(px(6.));
+        for (id, label, remove) in picked {
+            let cross = if t.glass {
+                crate::glass_ui::icon("cancel-01", 14., t.ink_soft)
+            } else {
+                blocks::icon("close", 14., t.ink_soft)
+            };
+            row = row.child(
+                button(format!("mods-picked-{id}"), label, Kind::Secondary, &t)
+                    .gap(px(6.))
+                    .child(cross)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        let remove = remove.clone();
+                        this.mods_filter(move |f| remove(f));
+                        cx.notify();
+                    })),
+            );
+        }
+        row.child(
+            button("mods-picked-clear", "Clear filters", Kind::Ghost, &t).on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    // The sort has its own control: only what filters goes.
+                    this.mods_filter(|f| {
+                        *f = Filters {
+                            sort: f.sort,
+                            ..Filters::default()
+                        }
+                    });
+                    cx.notify();
+                },
+            )),
+        )
     }
 
     /// The open project's page.
@@ -549,18 +731,33 @@ impl Launcher {
         let o = self.mods.browse.open.as_ref()?;
         let p = o.project.clone();
         let tab = o.tab;
-        let support = self.mods.support(&p);
+        let shot = o.shot;
+        let review = o.pack_review.as_ref();
+        let review_pending = self.mods.needs_pack_review(&p) && review.is_none();
+        let review_failed = matches!(review, Some(Err(_)));
+        let support = match review {
+            Some(Ok(review)) => review.support.clone(),
+            Some(Err(error)) => Support::No(trf(
+                "Could not check this version's dependencies: {error}",
+                &[("error", error)],
+            )),
+            None => self.mods.support(&p),
+        };
         let color = match support {
             Support::Works => t.success,
             Support::Partial(_) => t.warn,
             Support::No(_) => t.muted,
         };
-        let back = button("mods-back", "Back to results", Kind::Ghost, &t).on_click(cx.listener(
-            |this, _: &ClickEvent, _, cx| {
-                this.mods.browse.open = None;
-                cx.notify();
-            },
-        ));
+        let back = button(
+            "mods-back",
+            format!("← {}", tr("Back to results")),
+            Kind::Secondary,
+            &t,
+        )
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.mods.browse.open = None;
+            cx.notify();
+        }));
         let details = o.details.clone();
         let versions = o.versions.clone();
         let version_list = o.version_list.clone();
@@ -569,10 +766,14 @@ impl Launcher {
             &[("count", &thousands(p.downloads))],
         )];
         if let Some(Ok(d)) = &details {
-            meta.push(trf(
-                "{count} followers",
-                &[("count", &thousands(d.followers))],
-            ));
+            // A registry project has no followers: its source repository's stars stand beside its
+            // rating instead, as a star and a number (`mods_page::stars`).
+            if p.source != SourceId::Horizon {
+                meta.push(trf(
+                    "{count} followers",
+                    &[("count", &thousands(d.followers))],
+                ));
+            }
             if let Some(day) = d.updated.get(..10) {
                 meta.push(trf("updated {date}", &[("date", day)]));
             }
@@ -580,15 +781,28 @@ impl Launcher {
         if !p.license.is_empty() {
             meta.push(p.license.clone());
         }
-        meta.push(trf("from {source}", &[("source", p.source.label())]));
+        if let Some(source) = p.source.shown_for(&p.id) {
+            meta.push(trf("from {source}", &[("source", source)]));
+        }
         let authors = match &details {
             Some(Ok(d)) if !d.authors.is_empty() => d.authors.join(", "),
             _ => p.author.clone(),
         };
+        // The project's categories, as its source lists them.
+        let categories = match &details {
+            Some(Ok(d)) if !d.categories.is_empty() => Some(
+                div().flex().flex_wrap().gap(px(6.)).children(
+                    d.categories
+                        .iter()
+                        .map(|c| blocks::badge(category_name(c), t.muted, &t)),
+                ),
+            ),
+            _ => None,
+        };
         let icon = self.mods_icon(&p, 72.);
         let busy = self.mods.busy.as_ref().map(|b| b.0.clone());
         let installed = self.mods.entry(&p).is_some();
-        let checking = self.mods.checking(&p);
+        let checking = review_pending || self.mods.checking(&p);
         let mut action = div().flex().items_center().gap(px(8.)).child(
             caps(if checking {
                 tr("Checking")
@@ -614,7 +828,9 @@ impl Launcher {
             } else {
                 let p = p.clone();
                 install = install.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mods_install(p.source, p.id.clone(), Some(p.clone()));
+                    this.mods_install(crate::mods_page::InstallRequest::Browse(Box::new(
+                        p.clone(),
+                    )));
                     cx.notify();
                 }));
             }
@@ -650,7 +866,8 @@ impl Launcher {
                         text(theme::CAPTION)
                             .text_color(t.muted)
                             .child(meta.join(" · ")),
-                    ),
+                    )
+                    .children(categories),
             )
             .child(action);
         let mut page = div()
@@ -659,9 +876,14 @@ impl Launcher {
             .gap(px(24.))
             .child(div().flex().child(back))
             .child(head);
-        // Registry projects are rated on the site, signed in with GitHub (one rating per account).
+        // Registry projects are rated on the site, signed in with GitHub (one rating per account),
+        // and starred on their source repository, which the player does there themselves.
         if p.source == SourceId::Horizon {
             let url = browser::horizon::rate_url(&p.id);
+            let repo = match &details {
+                Some(Ok(d)) => d.github.as_ref().map(|g| g.url.clone()),
+                _ => None,
+            };
             page = page.child(
                 div()
                     .flex()
@@ -671,7 +893,11 @@ impl Launcher {
                     .child(
                         button("mods-rate", "Sign in with GitHub to rate", Kind::Ghost, &t)
                             .on_click(move |_, _, cx| cx.open_url(&url)),
-                    ),
+                    )
+                    .children(repo.map(|repo| {
+                        button("mods-star", "Star on GitHub", Kind::Ghost, &t)
+                            .on_click(move |_, _, cx| cx.open_url(&repo))
+                    })),
             );
         }
         if let Some(why) = support.reason() {
@@ -679,6 +905,21 @@ impl Launcher {
                 text(theme::UI)
                     .text_color(t.ink_soft)
                     .child(why.to_string()),
+            );
+        }
+        if review_failed {
+            let project = p.clone();
+            page = page.child(
+                button(
+                    "mods-retry-pack-check",
+                    tr("Try again"),
+                    Kind::Secondary,
+                    &t,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.mods_open(project.clone());
+                    cx.notify();
+                })),
             );
         }
         if let Some(Checking::Done(c)) = self.mods.checks.get(&(p.source, p.id.clone())) {
@@ -726,7 +967,13 @@ impl Launcher {
             page = page.child(links);
         }
         let this = cx.entity().downgrade();
-        page = page.child(div().flex().child(segments("mods-tab", &TABS, tab, &t, {
+        // No Gallery tab for a project without images.
+        let no_gallery = matches!(&details, Some(Ok(d)) if d.gallery.is_empty());
+        let tabs: Vec<(Tab, &str)> = TABS
+            .into_iter()
+            .filter(|(tab, _)| !(no_gallery && *tab == Tab::Gallery))
+            .collect();
+        page = page.child(div().flex().child(segments("mods-tab", &tabs, tab, &t, {
             move |value, _, cx| {
                 let _ = this.update(cx, |this, cx| {
                     if let Some(o) = &mut this.mods.browse.open {
@@ -746,31 +993,7 @@ impl Launcher {
                 None => centered(tr("Loading…"), &t),
                 Some(Err(e)) => notice(e.clone(), &t),
                 Some(Ok(d)) if d.gallery.is_empty() => centered(tr("No gallery images."), &t),
-                Some(Ok(d)) => {
-                    let mut grid = div().flex().flex_wrap().gap(px(16.));
-                    for g in &d.gallery {
-                        let shot = match self.mods_image(&g.url, images::GALLERY) {
-                            Some(path) => img(path).w(px(360.)).h(px(203.)).into_any_element(),
-                            None => plate(&t).w(px(360.)).h(px(203.)).into_any_element(),
-                        };
-                        grid = grid.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.))
-                                .w(px(360.))
-                                .child(plate(&t).overflow_hidden().child(shot))
-                                .when(!g.title.is_empty(), |d| {
-                                    d.child(
-                                        text(theme::CAPTION)
-                                            .text_color(t.ink_soft)
-                                            .child(g.title.clone()),
-                                    )
-                                }),
-                        );
-                    }
-                    grid
-                }
+                Some(Ok(d)) => self.mods_gallery(&d.gallery, shot, cx),
             },
             Tab::Versions => match &versions {
                 None => centered(tr("Loading…"), &t),
@@ -817,7 +1040,117 @@ impl Launcher {
     }
 }
 
+impl Launcher {
+    /// A gallery: image `shot` large, the previous and next ones a click away, and every image
+    /// as a strip of thumbnails that picks the large one.
+    fn mods_gallery(&mut self, gallery: &[Image], shot: usize, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let count = gallery.len();
+        let shot = shot.min(count.saturating_sub(1));
+        let pick = |to: usize| {
+            cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
+                if let Some(o) = &mut this.mods.browse.open {
+                    o.shot = to;
+                }
+                cx.notify();
+            })
+        };
+        let image = |this: &mut Self, url: &str, w: f32, h: f32| match this
+            .mods_image(url, images::GALLERY)
+        {
+            Some(path) => img(path)
+                .w(px(w))
+                .h(px(h))
+                .object_fit(gpui::ObjectFit::Contain)
+                .into_any_element(),
+            None => plate(&t).w(px(w)).h(px(h)).into_any_element(),
+        };
+        let current = &gallery[shot];
+        let large = image(self, &current.url, 760., 428.);
+        let step = |id: &'static str, back: bool, to: usize| {
+            div()
+                .id(id)
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .size(px(32.))
+                .cursor_pointer()
+                .child(
+                    blocks::icon("chevron-right", 16., t.ink_soft).with_transformation(
+                        gpui::Transformation::rotate(gpui::radians(if back {
+                            std::f32::consts::PI
+                        } else {
+                            0.
+                        })),
+                    ),
+                )
+                .on_click(pick(to))
+        };
+        let mut out = div().flex().flex_col().gap(px(10.)).max_w(px(760.)).child(
+            plate(&t)
+                .id("mods-shot")
+                .overflow_hidden()
+                .cursor_pointer()
+                .child(large)
+                .on_click(pick((shot + 1) % count)),
+        );
+        if !current.title.is_empty() {
+            out = out.child(
+                text(theme::CAPTION)
+                    .text_color(t.ink_soft)
+                    .child(current.title.clone()),
+            );
+        }
+        if count < 2 {
+            return out;
+        }
+        let mut strip = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .child(step("mods-shot-back", true, (shot + count - 1) % count));
+        for (i, g) in gallery.iter().enumerate() {
+            let thumb = image(self, &g.url, 120., 68.);
+            strip = strip.child(
+                div()
+                    .id(SharedString::from(format!("mods-shot-{i}")))
+                    .flex_none()
+                    .overflow_hidden()
+                    .border_2()
+                    .border_color(if i == shot { t.accent } else { t.outline })
+                    .cursor_pointer()
+                    .child(thumb)
+                    .on_click(pick(i)),
+            );
+        }
+        strip = strip
+            .child(step("mods-shot-next", false, (shot + 1) % count))
+            .child(
+                text(theme::CAPTION)
+                    .text_color(t.muted)
+                    .child(format!("{} / {count}", shot + 1)),
+            );
+        out.child(strip)
+    }
+}
+
 impl Opened {
+    fn new(project: Project, request: u64) -> Self {
+        Self {
+            project,
+            request,
+            tab: Tab::Description,
+            details: None,
+            versions: None,
+            pack_review: None,
+            version_list: cull::Cull::default(),
+            checked_versions: HashMap::new(),
+            shot: 0,
+        }
+    }
+
     /// A check can finish before or after the version request; retain either event order.
     fn apply_checks(&mut self) {
         let Some(Ok(versions)) = &mut self.versions else {
@@ -828,5 +1161,38 @@ impl Opened {
                 row.verdict = Some(*verdict);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reopening_the_same_project_rejects_the_old_versions_response() {
+        let project = Project {
+            source: SourceId::Modrinth,
+            id: "pack".into(),
+            slug: "pack".into(),
+            title: "Pack".into(),
+            summary: String::new(),
+            author: String::new(),
+            downloads: 0,
+            page: String::new(),
+            icon: None,
+            license: String::new(),
+            kind: PackKind::ResourcePack,
+            game_versions: Vec::new(),
+            loaders: Vec::new(),
+            blocked: None,
+        };
+        let mut browse = Browse {
+            open: Some(Opened::new(project.clone(), 1)),
+            ..Browse::default()
+        };
+        browse.open = Some(Opened::new(project, 2));
+        browse.load_versions(2, Ok(Vec::new()));
+        browse.load_versions(1, Err("stale response".into()));
+        assert!(matches!(browse.open.unwrap().versions, Some(Ok(_))));
     }
 }

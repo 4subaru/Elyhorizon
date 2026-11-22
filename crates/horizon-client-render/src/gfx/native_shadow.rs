@@ -9,6 +9,7 @@
 use horizon_shader_api::{Frame as FrameInputs, manifest::Shadow as Settings, stages::GROUP};
 use horizon_shaders::Shadow;
 
+use super::external::ShadowDraws;
 use super::native_material::TerrainShape;
 use super::wgsl_prefix::{TERRAIN, prefixed, section};
 
@@ -23,9 +24,13 @@ struct HorizonShadowOut {
     @location(1) @interpolate(flat) layer: u32,
     @location(2) tint: vec3<f32>,
     @location(3) @interpolate(flat) fluid: u32,
+    // The point on the flat face, camera-relative (`[displacement]`'s grid takes it over near
+    // the camera).
+    @location(4) base: vec3<f32>,
 }
-// `color` is the vertex colour: the tint, and the fluid flag in its alpha's high nibble
-// (mesher.rs's `fluid_face`).
+// `color` is the vertex colour: the tint, and the fluid flag in its alpha's bit 3 (mesher.rs's
+// `FLUID_BIT`, clear on a fluid). What the light passes through is that colour, whether or not the
+// sections carry their quads' looks: a pack's `shadow_color` doesn't depend on its other inputs.
 fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>)
     -> HorizonShadowOut {
     let clip = frame.shadow_view_proj * vec4(pos, 1.0);
@@ -35,29 +40,51 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
     out.uv = uv;
     out.layer = layer;
     out.tint = color.rgb;
-    let high = u32(round(color.a * 255.0)) >> 4u;
-    out.fluid = u32(high >= 8u && (high & 7u) < 6u);
+    out.fluid = u32((u32(round(color.a * 255.0)) & 8u) == 0u);
+    out.base = pos;
     return out;
 }
-@vertex fn horizon_shadow_vs(
+// `slot`: the corner's in the arena page, whose look is its quad's; `corner` its index there.
+fn horizon_shadow_terrain(c: HorizonCorner, origin: vec4<f32>, slot: u32, corner: u32)
+    -> HorizonShadowOut {
+    let atlas = horizon_terrain_terrain_uv(c.uv, origin.w);
+    let look = horizon_look(slot);
+    let pos = horizon_material_displace(c.position + origin.xyz, atlas, c.layer, c.color, c.light,
+        look, horizon_look_ao(look, corner));
+    return horizon_shadow_vertex(pos, atlas, c.layer, c.color);
+}
+@vertex fn horizon_shadow_vs(@builtin(vertex_index) vertex: u32,
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
     @location(5) origin: vec4<f32>) -> HorizonShadowOut {
-    let atlas = horizon_terrain_terrain_uv(uv, origin.w);
-    let pos = horizon_material_displace(position + origin.xyz, atlas, layer, color, light);
-    return horizon_shadow_vertex(pos, atlas, layer, color);
+    return horizon_shadow_terrain(HorizonCorner(position, uv, layer, color, light), origin, vertex,
+        vertex & 3u);
 }
 @vertex fn horizon_shadow_vs_flat(
     @builtin(vertex_index) index: u32,
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>, @location(2) layer: u32,
     @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> HorizonShadowOut {
-    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 8u]];
-    let atlas = horizon_terrain_terrain_uv(uv, origin.w);
-    let pos = horizon_material_displace(position + origin.xyz, atlas, layer, color, light);
-    return horizon_shadow_vertex(pos, atlas, layer, color);
+    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 6u]];
+    return horizon_shadow_terrain(HorizonCorner(position, uv, layer, color, light), origin, index,
+        index & 3u);
+}
+// Solid draws reading the arena page (`SECTION_CORNER`), in either layout of the solid quads.
+@vertex fn horizon_shadow_vs_section(@builtin(vertex_index) vertex: u32,
+    @location(5) origin: vec4<f32>) -> HorizonShadowOut {
+    let s = horizon_terrain_section_corner(vertex);
+    return horizon_shadow_terrain(horizon_terrain_corner_inputs(s.c), origin, s.slot, vertex & 3u);
+}
+@vertex fn horizon_shadow_vs_section_flat(@builtin(vertex_index) vertex: u32) -> HorizonShadowOut {
+    let s = horizon_terrain_section_corner(vertex);
+    let origin = horizon_corner_origin(s);
+    return horizon_shadow_terrain(horizon_terrain_corner_inputs(s.c), origin, s.slot, vertex & 3u);
 }
 @fragment fn horizon_shadow_fs(in: HorizonShadowOut) {
+    if horizon_shadow_taken(in.base, in.layer) { discard; }
+    horizon_shadow_cutout(in);
+}
+fn horizon_shadow_cutout(in: HorizonShadowOut) {
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
     let alpha = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu).a;
     if alpha < 0.5 && (in.layer & 0x8000u) == 0u && !horizon_shadow_solid(in.layer & 0x7fffu) { discard; }
@@ -67,7 +94,7 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
 @fragment fn horizon_shadow_fs_translucent(in: HorizonShadowOut) -> @location(0) vec4<f32> {
     let color = horizon_terrain_sprite(in.uv, in.layer & 0x7fffu);
     if color.a < 0.01 { discard; }
-    return vec4(color.rgb * in.tint, select(min(color.a, 0.99), 1.0, in.fluid != 0u));
+    return vec4(horizon_line_in(color.rgb * in.tint), select(min(color.a, 0.99), 1.0, in.fluid != 0u));
 }
 ";
 
@@ -105,16 +132,55 @@ struct HorizonEntityShadowOut {
 }
 ";
 
-/// `shadow_color`'s format.
-const SHADOW_COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// No `[displacement]` grid: the flat terrain casts everywhere.
+const UNTAKEN: &str = "
+fn horizon_shadow_taken(base: vec3<f32>, layer: u32) -> bool {
+    return false;
+}
+";
+
+/// `[displacement]`'s grid in the shadow map (gfx/displace.rs), cast in the flat quads' place.
+/// The height maps join the pass's frame group.
+const GRID_ENTRIES: &str = "
+@group(3) @binding(12) var horizon_pbr_normals: texture_2d_array<f32>;
+fn horizon_shadow_taken(base: vec3<f32>, layer: u32) -> bool {
+    return length(base) < horizon_displace_distance - 0.05 && horizon_displaced_layer(layer);
+}
+@vertex fn horizon_shadow_vs_displaced(@builtin(vertex_index) v: u32,
+    @builtin(instance_index) instance: u32) -> HorizonShadowOut {
+    let p = horizon_displace_point(v, instance);
+    var out = horizon_shadow_vertex(p.position, p.uv, p.layer, p.color);
+    out.base = p.base;
+    return out;
+}
+@fragment fn horizon_shadow_fs_displaced(in: HorizonShadowOut) {
+    if length(in.base) >= horizon_displace_distance + 0.05 { discard; }
+    horizon_shadow_cutout(in);
+}
+";
+
+/// What the shadow pass's grid is built from: `[displacement]`'s values, the material stage
+/// (whose module holds `displacement` and the vertex stage), group 1's layout and the height
+/// maps.
+pub struct ShadowGrid<'a> {
+    pub distance: f32,
+    pub cells: u32,
+    pub steps: bool,
+    pub material: &'a horizon_shader_api::check::CheckedStage,
+    pub layout: &'a wgpu::BindGroupLayout,
+    pub normals: &'a wgpu::TextureView,
+}
+
+/// `shadow_color`'s format: it holds linear light, which 8 bits would band.
+const SHADOW_COLOR: wgpu::TextureFormat = super::native_post::INTERMEDIATE;
 
 /// The shader pack's shadow camera for `settings`: orthographic over `distance` each side,
 /// staying put while the camera walks a `SNAP`-block cell. The map is distorted about its
 /// centre, so a centre that moves with the camera, even by a texel, resamples every shadow but
 /// the nearest each frame and they shimmer; a still one maps the world to the same texels until
-/// the next cell. Its depth starts 256 blocks further toward the light than `shaders/` packs'
-/// (the projection's near plane is at `-near`), so the ground over a deep cave still casts its
-/// shadow, and ends past the build height and the slant across the map below the camera.
+/// the next cell. Its depth starts 356 blocks toward the light (256 further than `shaders/`
+/// packs' default), so the ground over a deep cave still casts its shadow, and ends past the
+/// build height and the slant across the map below the camera.
 pub fn camera(settings: &Settings) -> Shadow {
     Shadow {
         resolution: settings.resolution,
@@ -122,8 +188,8 @@ pub fn camera(settings: &Settings) -> Shadow {
         render_mul: 1.0,
         interval: SNAP,
         euclidean_snap: true,
-        near: 256.0,
-        far: super::pack_uniforms::SHADOW_EYE + 2.0 * settings.distance + 384.0,
+        near: Some(-356.0),
+        far: Some(2.0 * settings.distance + 384.0),
         ..Shadow::default()
     }
 }
@@ -326,13 +392,16 @@ pub struct NativeShadow {
     /// The entities' draw, with the entities' group 0 (`ENTITY_ENTRIES`).
     pub entity: wgpu::RenderPipeline,
     pub group: wgpu::BindGroup,
+    /// `[displacement]`'s grid (gfx/displace.rs's shadow list).
+    pub displaced: Option<wgpu::RenderPipeline>,
 }
 
-/// The entity draw's shader.
+/// The entity draw's shader. Like the terrain's (`shader_source`), it declares `Frame` without
+/// the field only some packs' preludes have (`moon_phase`).
 fn entity_source() -> String {
     format!(
         "{}@group({GROUP}) @binding(0) var<uniform> frame: Frame;\n{}{ENTITY_ENTRIES}",
-        FrameInputs::WGSL.wgsl(),
+        FrameInputs::declared_wgsl(true, true, false, false, false),
         horizon_shader_api::stages::SHADOW_HELPERS,
     )
 }
@@ -418,29 +487,53 @@ fn shadow_solid(materials: &[(u32, u32)], solid: &[u32]) -> String {
 }
 
 /// The shadow pass's shader: the frame, Horizon's terrain, and the entries, with the layers
-/// `solid` of `shadow_solid`.
-fn shader_source(solid: &str, vertex: Option<&str>, materials: &[(u32, u32)]) -> String {
-    let (head, displace) = match vertex {
-        Some(stage) => (
-            stage.to_owned()
-                + &super::native_material::layer_table("horizon_sprite_material", materials),
+/// `solid` of `shadow_solid`. Under `[displacement]` (`grid`: the material stage's source, which
+/// holds the vertex stage and `displacement`), its grid too.
+fn shader_source(
+    solid: &str,
+    vertex: Option<&str>,
+    materials: &[(u32, u32)],
+    grid: Option<&str>,
+) -> String {
+    let table = super::native_material::layer_table("horizon_sprite_material", materials);
+    let (head, displace) = match (grid, vertex) {
+        (Some(material), _) => (
+            format!(
+                "{material}{}{table}{}{}{GRID_ENTRIES}",
+                horizon_shader_api::stages::PBR_STUB,
+                super::displace::RELIEF,
+                // The grid's lit colour is the material's (`lit_tint`); the shadow map has no
+                // use for it.
+                super::native_material::lit_marks(super::displace::GRID, false),
+            ),
+            if vertex.is_some() {
+                super::native_material::DISPLACE_PACK
+            } else {
+                super::native_material::DISPLACE_VANILLA
+            },
+        ),
+        (None, Some(stage)) => (
+            format!("{stage}{table}{UNTAKEN}"),
             super::native_material::DISPLACE_PACK,
         ),
-        None => (
+        (None, None) => (
             format!(
-                "{}@group({GROUP}) @binding(0) var<uniform> frame: Frame;\n{}",
-                FrameInputs::WGSL.wgsl(),
+                "{}@group({GROUP}) @binding(0) var<uniform> frame: Frame;\n{}{UNTAKEN}",
+                FrameInputs::declared_wgsl(true, true, false, false, false),
                 horizon_shader_api::stages::SHADOW_HELPERS,
             ),
             super::native_material::DISPLACE_VANILLA,
         ),
     };
     format!(
-        "{head}// Horizon's terrain (terrain.wgsl)\n{}{solid}{displace}{ENTRIES}",
+        "{head}// Horizon's terrain (terrain.wgsl)\n{}{solid}{}{displace}{}{ENTRIES}",
         prefixed(
-            section(TERRAIN, "struct Globals {", "// Sky (SkyRenderer)"),
+            &(super::wgsl_prefix::HDR_LIGHT.to_owned()
+                + section(TERRAIN, "struct Globals {", "// Sky (SkyRenderer)")),
             PREFIX
-        )
+        ),
+        super::native_post::line_helpers(false),
+        super::native_material::section_corner(),
     )
 }
 
@@ -452,12 +545,19 @@ impl NativeShadow {
         solid_materials: &[u32],
         vertex: Option<&horizon_shader_api::check::CheckedStage>,
         constants: &[(String, f64)],
+        grid: Option<ShadowGrid<'_>>,
     ) -> Result<Self, String> {
         let text = shader_source(
-            &shadow_solid(shape.sprite_materials, solid_materials),
+            &(shadow_solid(shape.sprite_materials, solid_materials)
+                + super::looks::wgsl(shape.looks.is_some())),
             vertex.map(|s| s.source.as_str()),
             shape.sprite_materials,
+            grid.as_ref().map(|g| g.material.source.as_str()),
         );
+        // The vertex stage's call (`DISPLACE_PACK`) passes `shaded_tint` where its input has it.
+        let shaded = vertex.is_some_and(horizon_shader_api::check::CheckedStage::shaded_tint);
+        let text = horizon_shader_api::stages::shaded_entries(&text, shaded);
+        let staged = vertex.is_some();
         let module = naga::front::wgsl::parse_str(&text)
             .map_err(|e| format!("shadow pass: {}", e.emit_to_string(&text)))?;
         let mut constants = super::native_post::present_constants(&module, constants);
@@ -465,37 +565,67 @@ impl NativeShadow {
             ("horizon_terrain_SPRITE_ARRAYS", shape.sprites[0]),
             ("horizon_terrain_SPRITE_SPLIT", shape.sprites[1]),
         ]);
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        if let Some(g) = &grid {
+            constants.extend([
+                ("horizon_displace_distance", f64::from(g.distance)),
+                ("horizon_displace_cells", f64::from(g.cells)),
+                ("horizon_displace_steps", f64::from(u8::from(g.steps))),
+            ]);
+        }
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Native shader pack shadow"),
             source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
         });
+        // The frame alone, and under `[displacement]` the height maps its grid moves by.
+        let frame_entry = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(size_of::<FrameInputs>() as u64),
+            },
+            count: None,
+        };
+        let normals_entry = wgpu::BindGroupLayoutEntry {
+            binding: 12,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let layout_entries: Vec<_> = std::iter::once(frame_entry)
+            .chain(grid.is_some().then_some(normals_entry))
+            .collect();
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Native shader pack shadow frame"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(size_of::<FrameInputs>() as u64),
-                },
-                count: None,
-            }],
+            entries: &layout_entries,
         });
+        let group_entries: Vec<_> = std::iter::once(wgpu::BindGroupEntry {
+            binding: 0,
+            resource: frame.buffer.as_entire_binding(),
+        })
+        .chain(grid.as_ref().map(|g| wgpu::BindGroupEntry {
+            binding: 12,
+            resource: wgpu::BindingResource::TextureView(g.normals),
+        }))
+        .collect();
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Native shader pack shadow frame"),
             layout: &frame_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame.buffer.as_entire_binding(),
-            }],
+            entries: &group_entries,
         });
         let layout = |flat: Option<&wgpu::BindGroupLayout>| {
             let mut groups: [Option<&wgpu::BindGroupLayout>; GROUP as usize + 1] =
                 Default::default();
             groups[0] = Some(shape.globals);
             groups[1] = flat;
+            groups[super::looks::GROUP as usize] = shape.looks;
             groups[GROUP as usize] = Some(&frame_layout);
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Native shader pack shadow"),
@@ -519,10 +649,19 @@ impl NativeShadow {
             blend: None,
             write_mask: wgpu::ColorWrites::ALL,
         })];
-        let pipeline = |layout: &wgpu::PipelineLayout,
-                        vertex: &str,
-                        buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
-                        translucent: bool| {
+        let pipeline_with = |layout: &wgpu::PipelineLayout,
+                             vertex: &str,
+                             buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+                             fragment: &str| {
+            let translucent = fragment == "horizon_shadow_fs_translucent";
+            // The vertex stage's (`DISPLACE_PACK`): a fluid of this pass is water.
+            let mut constants = constants.clone();
+            if staged {
+                constants.push((
+                    "horizon_material_translucent",
+                    f64::from(u8::from(translucent)),
+                ));
+            }
             let options = wgpu::PipelineCompilationOptions {
                 constants: &constants,
                 ..Default::default()
@@ -556,11 +695,7 @@ impl NativeShadow {
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some(if translucent {
-                        "horizon_shadow_fs_translucent"
-                    } else {
-                        "horizon_shadow_fs"
-                    }),
+                    entry_point: Some(fragment),
                     compilation_options: options,
                     targets: if translucent { &color_target } else { &[] },
                 }),
@@ -568,34 +703,64 @@ impl NativeShadow {
                 cache: None,
             })
         };
+        let pipeline = |layout: &wgpu::PipelineLayout,
+                        vertex: &str,
+                        buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+                        translucent: bool| {
+            let fragment = if translucent {
+                "horizon_shadow_fs_translucent"
+            } else {
+                "horizon_shadow_fs"
+            };
+            pipeline_with(layout, vertex, buffers, fragment)
+        };
         let instanced = layout(None);
-        let solid = pipeline(
-            &instanced,
-            "horizon_shadow_vs",
-            &[Some(vertices.clone()), Some(instances.clone())],
-            false,
-        );
+        let flat_layout = shape.flat.map(|group| layout(Some(group)));
+        // With flat draws' page groups the solid draws read the page themselves
+        // (`SECTION_CORNER`), in either layout of the solid quads, as the renderer's do.
+        let solid = match &flat_layout {
+            Some(paged) => pipeline(
+                paged,
+                "horizon_shadow_vs_section",
+                &[None, Some(instances.clone())],
+                false,
+            ),
+            None => pipeline(
+                &instanced,
+                "horizon_shadow_vs",
+                &[Some(vertices.clone()), Some(instances.clone())],
+                false,
+            ),
+        };
         let translucent = pipeline(
             &instanced,
             "horizon_shadow_vs",
             &[Some(vertices.clone()), Some(instances)],
             true,
         );
-        let flat_layout = shape.flat.map(|group| layout(Some(group)));
-        let flat_pipeline = |translucent| {
-            flat_layout.as_ref().map(|layout| {
-                pipeline(
-                    layout,
-                    "horizon_shadow_vs_flat",
-                    &[Some(vertices.clone())],
-                    translucent,
-                )
-            })
-        };
-        let flat = flat_pipeline(false);
-        let flat_translucent = flat_pipeline(true);
+        let flat = flat_layout
+            .as_ref()
+            .map(|layout| pipeline(layout, "horizon_shadow_vs_section_flat", &[], false));
+        let flat_translucent = flat_layout.as_ref().map(|layout| {
+            pipeline(
+                layout,
+                "horizon_shadow_vs_flat",
+                &[Some(vertices.clone())],
+                true,
+            )
+        });
         let entity = entity_pipeline(device, shape.entities, &frame_layout);
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        // The grid's corners come from its group 1, not from vertex buffers.
+        let displaced = grid.as_ref().map(|g| {
+            pipeline_with(
+                &layout(Some(g.layout)),
+                "horizon_shadow_vs_displaced",
+                &[],
+                "horizon_shadow_fs_displaced",
+            )
+        });
+        let internal = pollster::block_on(internal.pop());
+        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
             return Err(format!("shadow pass: {e}"));
         }
         Ok(Self {
@@ -605,7 +770,106 @@ impl NativeShadow {
             flat_translucent,
             entity,
             group,
+            displaced,
         })
+    }
+}
+
+impl super::native_pack::NativePack {
+    /// The shadow camera's view this frame, for a pack with `[shadow]`.
+    pub fn shadow_request(&self, frame: &super::Frame) -> Option<super::external::ShadowView> {
+        self.shadow.as_ref()?;
+        self.frame.shadow_view(frame)
+    }
+
+    /// The pack's shadow passes (`[shadow]`): the solid terrain the light sees into its shadow
+    /// map, the translucent over a copy of it, then the entities. A pack without one gets its
+    /// 1×1 map cleared to "far" once.
+    pub fn draw_shadow(&mut self, draws: ShadowDraws<'_>) {
+        let ShadowDraws {
+            encoder,
+            mut timing,
+            lists,
+        } = draws;
+        self.frame.shadow_map.clear_blank(encoder);
+        let (Some(lists), Some(shadow)) = (lists, &self.shadow) else {
+            return;
+        };
+        let map = &self.frame.shadow_map;
+        let sections = &lists.sections;
+        let [first, solid, translucent] = lists.draws;
+        let mut pass = map.begin(encoder, "Native shader pack shadow", timing.as_deref_mut());
+        pass.set_bind_group(0, lists.group, &[]);
+        pass.set_bind_group(GROUP, &shadow.group, &[]);
+        if lists.flat_frame
+            && let Some(flat) = sections.flat
+            && let Some(pipeline) = &shadow.flat
+        {
+            pass.set_pipeline(pipeline);
+            let [first, translucent] = flat.shadow_calls;
+            flat.draw(
+                &mut pass,
+                &flat.calls[first..translucent],
+                sections.flat_vertices(),
+            );
+        } else if !lists.flat_frame {
+            pass.set_pipeline(&shadow.solid);
+            pass.set_index_buffer(sections.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(1, lists.instances.slice(..));
+            let pulled = sections.flat.is_some();
+            sections.draw(&mut pass, lists.indirect, 0, first, solid, pulled);
+        }
+        // `[displacement]`'s grid casts in place of the flat quads it took over.
+        if let Some((d, picks, pipeline)) = self
+            .displacement
+            .as_ref()
+            .and_then(|d| Some((d, d.shadow.as_ref()?, shadow.displaced.as_ref()?)))
+        {
+            d.draw(&mut pass, picks, pipeline);
+        }
+        drop(pass);
+        let mut pass =
+            map.begin_translucent(encoder, "Native shader pack translucent shadow", timing);
+        pass.set_bind_group(0, lists.group, &[]);
+        pass.set_bind_group(GROUP, &shadow.group, &[]);
+        if lists.flat_frame
+            && let Some(flat) = sections.flat
+            && let Some(pipeline) = &shadow.flat_translucent
+        {
+            pass.set_pipeline(pipeline);
+            let [_, translucent] = flat.shadow_calls;
+            flat.draw(
+                &mut pass,
+                &flat.calls[translucent..],
+                sections.flat_vertices(),
+            );
+        } else if !lists.flat_frame {
+            pass.set_pipeline(&shadow.translucent);
+            pass.set_index_buffer(sections.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(1, lists.instances.slice(..));
+            sections.draw(
+                &mut pass,
+                lists.indirect,
+                0,
+                first + solid,
+                translucent,
+                false,
+            );
+        }
+        drop(pass);
+        let (quads, shadow_only) = (lists.entity_quads, lists.shadow_only_quads);
+        if quads > 0 || shadow_only > 0 {
+            let mut pass = map.begin_entities(encoder, "Native shader pack entity shadow");
+            pass.set_pipeline(&shadow.entity);
+            pass.set_bind_group(0, lists.entity_group, &[]);
+            pass.set_bind_group(GROUP, &shadow.group, &[]);
+            pass.set_vertex_buffer(0, lists.entity_vertices.slice(..));
+            pass.set_index_buffer(sections.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..quads * 6, 0, 0..1);
+            // Before the GPU-posed outlines (`EntityBatch::append_shadow_only`).
+            let first = lists.outline_base - shadow_only * 4;
+            pass.draw_indexed(0..shadow_only * 6, first as i32, 0..1);
+        }
     }
 }
 
@@ -616,7 +880,12 @@ mod tests {
     #[test]
     fn the_shadow_shader_validates() {
         for materials in [&[][..], &[(3, 7), (4, 8), (9, 7)][..]] {
-            let text = shader_source(&shadow_solid(materials, &[7]), None, materials);
+            let text = shader_source(
+                &(shadow_solid(materials, &[7]) + crate::gfx::looks::NO_LOOK_WGSL),
+                None,
+                materials,
+                None,
+            );
             let module = naga::front::wgsl::parse_str(&text).unwrap();
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
@@ -624,6 +893,62 @@ mod tests {
             )
             .validate(&module)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));
+        }
+    }
+
+    /// The shadow shaders declare the whole frame, whatever the pack's keys: the SHA-256 of
+    /// `Frame`'s WGSL, so every pack's shadow pass is the same WGSL.
+    #[test]
+    fn the_shadow_shaders_declare_the_frame_as_before() {
+        use sha2::{Digest, Sha256};
+        let frame = FrameInputs::declared_wgsl(true, true, false, false, false);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&frame)),
+            "88afec7c6709091383bffd26f431131ac68e2f6fd5d1079dd7febb591209211a"
+        );
+        assert!(entity_source().starts_with(&frame));
+        let solid = shader_source(&shadow_solid(&[], &[7]), None, &[], None);
+        assert!(solid.starts_with(&frame));
+    }
+
+    #[test]
+    fn the_shadow_shader_with_the_displaced_grid_validates() {
+        use horizon_shader_api::{MANIFEST, Pack, StageKind, check};
+        let manifest = "schema = 1\nid = \"t\"\nname = \"T\"\nversion = \"1\"\napi = \"0.2\"\n\
+            [material]\nfile = \"material.wgsl\"\n[shadow]\n[displacement]\n";
+        let material = "fn material(input: MaterialInput) -> Surface {\n    \
+                return Surface(input.albedo);\n}\n\
+            fn displacement(input: DisplacementInput) -> f32 {\n    \
+                return (1.0 - input.height) * 0.125;\n}\n";
+        let files = [(MANIFEST, manifest), ("material.wgsl", material)]
+            .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+            .into();
+        let report = check(&Pack::from_files(files).unwrap()).unwrap();
+        let stage = report
+            .stages
+            .iter()
+            .find(|s| s.kind == StageKind::Material)
+            .unwrap();
+        let materials = [(3, 7)];
+        let text = shader_source(
+            &(shadow_solid(&materials, &[7]) + crate::gfx::looks::NO_LOOK_WGSL),
+            None,
+            &materials,
+            Some(&stage.source),
+        );
+        let module = naga::front::wgsl::parse_str(&text)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&text)));
+        for entry in ["horizon_shadow_vs_displaced", "horizon_shadow_fs_displaced"] {
+            assert!(
+                module.entry_points.iter().any(|e| e.name == entry),
+                "{entry}"
+            );
         }
     }
 
@@ -649,12 +974,7 @@ mod tests {
 
     #[test]
     fn what_the_camera_stands_on_is_inside_the_shadow_cameras_depth() {
-        let settings = Settings {
-            resolution: 2048,
-            distance: 128.0,
-            solid_materials: Vec::new(),
-        };
-        let shadow = camera(&settings);
+        let shadow = camera(&Settings::default());
         let (view, projection) = super::super::pack_uniforms::shadow_camera(
             glam::Vec3::new(0.3, 0.9, 0.0).normalize(),
             glam::DVec3::new(-2064.5, 246.0, -4304.5),
@@ -670,11 +990,7 @@ mod tests {
 
     #[test]
     fn the_centre_stays_near_the_player_on_both_sides_of_zero() {
-        let shadow = camera(&Settings {
-            resolution: 2048,
-            distance: 128.0,
-            solid_materials: Vec::new(),
-        });
+        let shadow = camera(&Settings::default());
         let light = glam::Vec3::Y;
         for x in [5.5, -5.5, -2064.5, 2064.5] {
             let camera = glam::DVec3::new(x, 64.0, x);

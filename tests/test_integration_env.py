@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 
+from tools import lab
 from tools.integration_env import game_environment, run_game, require_server_reports
 
 
@@ -18,9 +19,14 @@ class IntegrationEnvironmentTests(unittest.TestCase):
             self.assertEqual(len(set(homes)), 4)
             self.assertTrue(all(p.is_dir() and p.is_relative_to(root) for p in homes))
             self.assertEqual(env['DISPLAY'], ':123')
-            self.assertEqual(env['HORIZON_TELEMETRY_URL'], 'off')
             self.assertEqual(env['HORIZON_LAUNCHER_NO_SELF_UPDATE'], '1')
             self.assertEqual(env['HORIZON_NO_AUDIO'], '1')
+            self.assertEqual(env['HORIZON_TEST_LOOPBACK'], '1')
+
+    def test_real_lan_suites_can_keep_the_network_interfaces(self):
+        with tempfile.TemporaryDirectory() as root:
+            env = game_environment({'HORIZON_TEST_LOOPBACK': '0'}, root)
+            self.assertEqual(env['HORIZON_TEST_LOOPBACK'], '0')
 
     def test_each_fixture_process_gets_fresh_homes_and_cleanup(self):
         script = ('import json, os; from pathlib import Path; '
@@ -36,7 +42,7 @@ class IntegrationEnvironmentTests(unittest.TestCase):
 class PreparedReportTests(unittest.TestCase):
     def test_partial_report_install_shadows_complete_fallback(self):
         with tempfile.TemporaryDirectory() as root:
-            resources = Path(root) / 'horizon-client' / '26.3'
+            resources = Path(root) / 'horizon-client' / lab.VERSION
             fallback = Path(root) / 'datagen' / 'out' / 'reports'
             resources.mkdir(parents=True)
             fallback.mkdir(parents=True)

@@ -1,9 +1,7 @@
 //! Bounded, credential-safe GET retries. OAuth POSTs deliberately do not use these retries.
 use crate::i18n::trf;
 use std::{
-    fs,
-    io::{Read, Write},
-    path::Path,
+    io::Read,
     time::Duration,
 };
 
@@ -40,7 +38,7 @@ struct Failure {
     after: Option<Duration>,
 }
 
-fn request(url: &str, range: Option<(u64, &str)>) -> Result<ureq::Response, Failure> {
+fn request(url: &str) -> Result<ureq::Response, Failure> {
     let mut request = crate::backend::agent(url)
         .get(url)
         .set("Accept-Encoding", "identity");
@@ -50,11 +48,6 @@ fn request(url: &str, range: Option<(u64, &str)>) -> Result<ureq::Response, Fail
                 request = request.set("Authorization", &format!("Bearer {token}"));
             }
         }
-    }
-    if let Some((start, validator)) = range {
-        request = request
-            .set("Range", &format!("bytes={start}-"))
-            .set("If-Range", validator);
     }
     classify(url, request.call())
 }
@@ -147,27 +140,9 @@ fn pause(error: &Failure, attempt: usize, sleep: &dyn Fn(Duration)) -> bool {
     true
 }
 
-pub(crate) fn get(url: &str) -> Result<ureq::Response, String> {
-    retry_get(|| request(url, None), &std::thread::sleep)
-}
-
-fn retry_get(
-    mut call: impl FnMut() -> Result<ureq::Response, Failure>,
-    sleep: &dyn Fn(Duration),
-) -> Result<ureq::Response, String> {
-    for attempt in 0..ATTEMPTS {
-        match call() {
-            Ok(response) => return Ok(response),
-            Err(error) if pause(&error, attempt, sleep) => {}
-            Err(error) => return Err(error.message),
-        }
-    }
-    unreachable!()
-}
-
 pub(crate) fn small(url: &str) -> Result<Option<Vec<u8>>, String> {
     for attempt in 0..ATTEMPTS {
-        let result = request(url, None).and_then(|response| {
+        let result = request(url).and_then(|response| {
             let expected = response
                 .header("Content-Length")
                 .and_then(|n| n.parse::<usize>().ok());
@@ -203,7 +178,7 @@ pub(crate) fn small(url: &str) -> Result<Option<Vec<u8>>, String> {
 }
 
 pub(crate) fn bytes(url: &str) -> Result<Vec<u8>, String> {
-    bytes_with(url, || request(url, None), &std::thread::sleep)
+    bytes_with(url, || request(url), &std::thread::sleep)
 }
 
 fn bytes_with(
@@ -235,155 +210,6 @@ fn bytes_with(
 
 fn interrupted(url: &str) -> Failure {
     Failure { status: None, message: trf("Download from {endpoint} was interrupted. Retry the installation; verified files are kept.", &[("endpoint", &endpoint(url))]), retry: true, after: None }
-}
-
-/// Only a verified complete file is promoted. Range resumes require the same strong ETag
-/// and the expected Content-Range; a server ignoring Range restarts from zero.
-pub(crate) fn download(
-    url: &str,
-    size: u64,
-    digest: &str,
-    to: &Path,
-    progress: &impl Fn(f32),
-) -> Result<(), String> {
-    download_with(url, size, digest, to, progress, &std::thread::sleep)
-}
-
-fn download_with(
-    url: &str,
-    size: u64,
-    digest: &str,
-    to: &Path,
-    progress: &impl Fn(f32),
-    sleep: &dyn Fn(Duration),
-) -> Result<(), String> {
-    let mut random = [0u8; 12];
-    getrandom::fill(&mut random).map_err(|e| e.to_string())?;
-    let suffix: String = random.iter().map(|n| format!("{n:02x}")).collect();
-    let temporary = to.with_extension(format!("part-{suffix}"));
-    struct Partial<'a>(&'a Path);
-    impl Drop for Partial<'_> {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(self.0);
-        }
-    }
-    let _cleanup = Partial(&temporary);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .read(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|e| e.to_string())?;
-    let (mut done, mut total, mut etag) = (0u64, size, None::<String>);
-    for attempt in 0..ATTEMPTS {
-        let range = etag.as_deref().filter(|_| done > 0).map(|tag| (done, tag));
-        let response = match request(url, range) {
-            Ok(response) => response,
-            Err(error) if pause(&error, attempt, sleep) => continue,
-            Err(error) => return Err(error.message),
-        };
-        let length = response
-            .header("Content-Length")
-            .and_then(|n| n.parse::<u64>().ok());
-        if response.status() == 206 {
-            let valid = range.is_some()
-                && response
-                    .header("Content-Range")
-                    .and_then(|s| s.strip_prefix("bytes "))
-                    .and_then(|s| s.split_once('/'))
-                    .is_some_and(|(span, count)| {
-                        let Some((start, end)) = span.split_once('-') else {
-                            return false;
-                        };
-                        let (Ok(start), Ok(end), Ok(count)) = (
-                            start.parse::<u64>(),
-                            end.parse::<u64>(),
-                            count.parse::<u64>(),
-                        ) else {
-                            return false;
-                        };
-                        start == done
-                            && end >= start
-                            && end < count
-                            && (total == 0 || count == total)
-                            && length.is_none_or(|n| n == end - start + 1)
-                    });
-            if !valid {
-                return Err(trf(
-                    "Download server {endpoint} returned an invalid resume response.",
-                    &[("endpoint", &endpoint(url))],
-                ));
-            }
-        } else if response.status() == 200 {
-            use std::io::Seek;
-            file.set_len(0)
-                .and_then(|_| file.rewind())
-                .map_err(|e| e.to_string())?;
-            done = 0;
-            etag = response
-                .header("ETag")
-                .filter(|tag| tag.starts_with('"'))
-                .map(str::to_owned);
-            if total == 0 {
-                total = length.unwrap_or(0);
-            }
-        } else {
-            return Err(trf(
-                "Download server {endpoint} returned HTTP {status}.",
-                &[
-                    ("endpoint", &endpoint(url)),
-                    ("status", &response.status().to_string()),
-                ],
-            ));
-        }
-        let before = done;
-        let mut reader = response.into_reader();
-        let mut buf = [0u8; 65536];
-        let mut complete = true;
-        loop {
-            let n = match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) => {
-                    complete = false;
-                    break;
-                }
-            };
-            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-            done += n as u64;
-            if total > 0 && done > total {
-                return Err(trf(
-                    "Download from {endpoint} exceeded its expected size.",
-                    &[("endpoint", &endpoint(url))],
-                ));
-            }
-            progress((done as f32 / total.max(1) as f32).min(1.0) * 0.9);
-        }
-        complete &= length.is_none_or(|n| done - before == n) && (total == 0 || done == total);
-        if !complete {
-            let error = interrupted(url);
-            if pause(&error, attempt, sleep) {
-                continue;
-            }
-            return Err(error.message);
-        }
-        file.sync_all().map_err(|e| e.to_string())?;
-        drop(file);
-        let mut input = fs::File::open(&temporary).map_err(|e| e.to_string())?;
-        let mut hash = horizon_release_sign::Sha256::default();
-        loop {
-            let n = input.read(&mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            hash.update(&buf[..n]);
-        }
-        drop(input);
-        horizon_release_sign::check(&endpoint(url), digest, &hash.hex())?;
-        fs::rename(&temporary, to).map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    unreachable!()
 }
 
 #[cfg(test)]

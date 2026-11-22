@@ -29,6 +29,7 @@ impl BlockPos {
         )
     }
 
+    #[inline]
     pub const fn offset(self, dx: i32, dy: i32, dz: i32) -> Self {
         Self::new(
             self.x.wrapping_add(dx),
@@ -42,6 +43,7 @@ impl BlockPos {
         SectionPos::new(self.x >> 4, self.y >> 4, self.z >> 4)
     }
 
+    #[inline]
     pub const fn chunk(self) -> ChunkPos {
         ChunkPos::new(self.x >> 4, self.z >> 4)
     }
@@ -67,6 +69,11 @@ pub struct SectionPos {
 impl SectionPos {
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
         Self { x, y, z }
+    }
+
+    pub fn containing(at: crate::geometry::Vec3) -> Self {
+        let [x, y, z] = at.components().map(crate::geometry::floor_i32);
+        BlockPos::new(x, y, z).section()
     }
 
     pub const fn pack(self) -> i64 {

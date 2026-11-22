@@ -75,6 +75,8 @@ impl Environment {
 pub struct Filters {
     /// Every one of these categories (`decoration`, `worldgen`...).
     pub categories: Vec<String>,
+    /// Every one of these tags: Horizon's registry only, a project's own words (`zoom`, `pvp`...).
+    pub tags: Vec<String>,
     /// One loader (`neoforge`, `fabric`...), in place of the kind's defaults.
     pub loader: Option<String>,
     /// One Minecraft version, in place of the one Horizon plays.
@@ -82,6 +84,9 @@ pub struct Filters {
     pub environment: Option<Environment>,
     /// None: by relevance with search text, else by downloads.
     pub sort: Option<Sort>,
+    /// Only what works on the selected instance: Horizon's registry leaves out the native mods
+    /// with no version that builds on it.
+    pub works_on: bool,
 }
 
 impl Filters {
@@ -111,9 +116,31 @@ pub struct Tag {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tags {
     pub categories: Vec<Tag>,
+    /// Horizon's registry only: the tags its projects of the kind carry, the most used first.
+    pub tags: Vec<String>,
     pub loaders: Vec<String>,
     /// Release versions, newest first.
     pub game_versions: Vec<String>,
+}
+
+/// A category as playhorizon.dev names it (`categoryLabel` in the site's `mods-logic.ts`):
+/// `game-mechanics` reads "Game mechanics", `gui` "GUI". English: the launcher translates the
+/// names its tables have.
+pub fn category_label(slug: &str) -> String {
+    let words = match slug {
+        "gui" => return "GUI".into(),
+        "pbr" => return "PBR".into(),
+        "worldgen" => return "World generation".into(),
+        "semi-realistic" => return "Semi-realistic".into(),
+        "vanilla-like" => return "Vanilla-like".into(),
+        "core-shaders" => return "Core shaders".into(),
+        _ => slug.replace('-', " "),
+    };
+    let mut chars = words.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// A gallery image.
@@ -132,6 +159,15 @@ pub struct Link {
     pub url: String,
 }
 
+/// A project's GitHub repository and how many stars it has: a registry project whose source is
+/// on GitHub.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitHub {
+    /// `https://github.com/<owner>/<repo>`.
+    pub url: String,
+    pub stars: u64,
+}
+
 /// A project's page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Details {
@@ -140,7 +176,10 @@ pub struct Details {
     pub gallery: Vec<Image>,
     pub links: Vec<Link>,
     pub authors: Vec<String>,
+    /// Modrinth's followers; a registry project has none (it shows [`Details::github`] instead).
     pub followers: u64,
+    /// Where to star a registry project, and its stars there.
+    pub github: Option<GitHub>,
     pub published: String,
     pub updated: String,
     pub categories: Vec<String>,
@@ -230,6 +269,7 @@ pub fn modrinth_details(project: &Value, members: &Value) -> Details {
         categories,
         client_side: text(&project["client_side"]),
         server_side: text(&project["server_side"]),
+        github: None,
     }
 }
 
@@ -265,9 +305,29 @@ pub fn modrinth_tags(
             })
         })
         .collect();
-    categories.sort_by(|a, b| (&a.header, &a.name).cmp(&(&b.header, &b.name)));
+    categories.sort_by(|a, b| {
+        a.header.cmp(&b.header).then_with(|| {
+            let resolution = |name: &str| {
+                let (size, suffix) = name.split_once('x')?;
+                if matches!(suffix, "" | "+" | "-") {
+                    size.parse::<u32>().ok()
+                } else {
+                    None
+                }
+            };
+            if a.header == "resolutions" {
+                resolution(&a.name)
+                    .map_or((true, 0), |size| (false, size))
+                    .cmp(&resolution(&b.name).map_or((true, 0), |size| (false, size)))
+                    .then_with(|| a.name.cmp(&b.name))
+            } else {
+                a.name.cmp(&b.name)
+            }
+        })
+    });
     Tags {
         categories,
+        tags: Vec::new(),
         loaders: loader_names,
         game_versions: versions
             .as_array()
@@ -279,10 +339,19 @@ pub fn modrinth_tags(
     }
 }
 
-/// The loaders a kind lists by default, when no loader is picked: Java mod loaders for mods.
+pub fn loader_label(slug: &str) -> &str {
+    match slug {
+        "iris" => crate::i18n::tr("Iris"),
+        "optifine" => crate::i18n::tr("OptiFine"),
+        _ => slug,
+    }
+}
+
+/// The loaders a kind lists by default, when no loader is picked.
 pub fn default_loaders(kind: Kind) -> Vec<&'static str> {
     match kind {
         Kind::Mod => super::java::LOADERS.to_vec(),
+        Kind::Shader => super::SHADER_LOADERS.to_vec(),
         _ => Vec::new(),
     }
 }
@@ -348,6 +417,42 @@ mod tests {
         assert_eq!(t.categories[0].name, "decoration");
         assert_eq!(t.loaders, ["fabric"]);
         assert_eq!(t.game_versions, ["26.3"]);
+    }
+
+    #[test]
+    fn modrinth_resolutions_are_sorted_by_size_with_unknowns_last() {
+        let categories = Value::Array(
+            ["128x", "future-z", "16x", "512x+", "8x-", "64x", "256x", "32x", "48x", "future-a"]
+                .into_iter()
+                .map(|name| json!({"name": name, "project_type": "resourcepack", "header": "resolutions"}))
+                .collect(),
+        );
+        let tags = modrinth_tags("resourcepack", &categories, &Value::Null, &Value::Null);
+        assert_eq!(
+            tags.categories
+                .iter()
+                .map(|tag| tag.name.as_str())
+                .collect::<Vec<_>>(),
+            ["8x-", "16x", "32x", "48x", "64x", "128x", "256x", "512x+", "future-a", "future-z"],
+        );
+    }
+
+    #[test]
+    fn shader_loader_slugs_have_display_names() {
+        assert_eq!(loader_label("iris"), "Iris");
+        assert_eq!(loader_label("optifine"), "OptiFine");
+        assert_eq!(loader_label("fabric"), "fabric");
+    }
+
+    #[test]
+    fn categories_read_as_the_site_names_them() {
+        assert_eq!(category_label("game-mechanics"), "Game mechanics");
+        assert_eq!(category_label("kitchen-sink"), "Kitchen sink");
+        assert_eq!(category_label("worldgen"), "World generation");
+        assert_eq!(category_label("vanilla-like"), "Vanilla-like");
+        assert_eq!(category_label("gui"), "GUI");
+        assert_eq!(category_label("16x"), "16x");
+        assert_eq!(category_label(""), "");
     }
 
     #[test]

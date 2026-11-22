@@ -380,11 +380,22 @@ impl std::fmt::Display for CompileError {
 }
 impl std::error::Error for CompileError {}
 
+/// A density node whose sampler needs the world seed, which decoding doesn't have: a seeded
+/// compiler asks for it with its own seed (a mod's density function type).
+pub trait SeededDensity: std::fmt::Debug + Send + Sync {
+    fn sampler(&self, seed: i64) -> Arc<dyn DensitySampler>;
+}
+
 #[derive(Clone, Debug)]
 enum Definition {
     Node(GraphNode),
     Bound {
         sampler: Arc<dyn DensitySampler>,
+        range: Interval,
+        axes: u8,
+    },
+    Seeded {
+        factory: Arc<dyn SeededDensity>,
         range: Interval,
         axes: u8,
     },
@@ -415,10 +426,9 @@ impl DensityGraph {
             input,
             holder: Some(holder),
         } = node
+            && self.holders.get(holder.0) != Some(&input)
         {
-            if self.holders.get(holder.0) != Some(&input) {
-                return Err(CompileError::UnknownHolder);
-            }
+            return Err(CompileError::UnknownHolder);
         }
         if let GraphNode::Noise { noise, .. } | GraphNode::OffsetNoise { noise, .. } = node {
             self.noise_entry(noise)?;
@@ -428,10 +438,9 @@ impl DensityGraph {
             branches,
             ..
         } = &node
+            && (branches.len() != thresholds.len().saturating_add(1) || branches.len() > 256)
         {
-            if branches.len() != thresholds.len().saturating_add(1) || branches.len() > 256 {
-                return Err(CompileError::InvalidIntervals);
-            }
+            return Err(CompileError::InvalidIntervals);
         }
         // Fastutil threshold lists compare zeros numerically but hash their
         // signed bits. Among equal definitions, the only possible hash delta
@@ -528,6 +537,30 @@ impl DensityGraph {
         });
         Ok(id)
     }
+    /// [`Self::bind`] for a node whose sampler a seeded compiler makes with its seed; an unseeded
+    /// compiler refuses it with [`CompileError::MissingSeededContext`].
+    pub fn bind_seeded(
+        &mut self,
+        factory: Arc<dyn SeededDensity>,
+        range: Interval,
+        axes: u8,
+    ) -> Result<FunctionId, CompileError> {
+        if axes & !7 != 0 {
+            return Err(CompileError::InvalidAxes);
+        }
+        let id = FunctionId(self.entries.len());
+        self.entries.push(Entry {
+            definition: Definition::Seeded {
+                factory,
+                range,
+                axes,
+            },
+            depth: 1,
+            equality_id: id,
+            hash_variant: false,
+        });
+        Ok(id)
+    }
     fn entry(&self, id: FunctionId) -> Result<&Entry, CompileError> {
         self.entries.get(id.0).ok_or(CompileError::UnknownFunction)
     }
@@ -587,7 +620,7 @@ impl DensityGraph {
     }
     pub fn domain_axes(&self, id: FunctionId) -> Result<u8, CompileError> {
         let mut node = match &self.entry(id)?.definition {
-            Definition::Bound { axes, .. } => return Ok(*axes),
+            Definition::Bound { axes, .. } | Definition::Seeded { axes, .. } => return Ok(*axes),
             Definition::Node(node) => node.clone(),
         };
         let mask = match node {
@@ -624,7 +657,9 @@ impl DensityGraph {
     }
     pub fn range(&self, id: FunctionId) -> Result<Interval, CompileError> {
         let node = match &self.entry(id)?.definition {
-            Definition::Bound { range, .. } => return Ok(*range),
+            Definition::Bound { range, .. } | Definition::Seeded { range, .. } => {
+                return Ok(*range);
+            }
             Definition::Node(node) => node,
         };
         Ok(match *node {
@@ -708,5 +743,75 @@ impl DensityGraph {
                 super::arithmetic::java_max(lower as f32, self.range(upper)?.max()),
             )?,
         })
+    }
+    /// Inclusive `y` bounds outside which `id` is never positive, at any x
+    /// and z, read from its shape: through registry references, a range
+    /// choice whose input is a clamped `y` gradient and whose out-of-range
+    /// branch is a constant `<= 0` (as vanilla's ore vein densities are).
+    /// A side the gradient stays in range on is unbounded (`i32::MIN` or
+    /// `i32::MAX`); `low > high` when the input is never in range. `None` for
+    /// any other shape.
+    pub fn positive_y_bounds(&self, id: FunctionId) -> Result<Option<[i32; 2]>, CompileError> {
+        let Some(&GraphNode::Choice {
+            input,
+            min,
+            max,
+            outside,
+            ..
+        }) = self.resolve_references(id)?
+        else {
+            return Ok(None);
+        };
+        if !matches!(self.resolve_references(outside)?, Some(&GraphNode::Constant(value)) if value <= 0.0)
+        {
+            return Ok(None);
+        }
+        let Some(&GraphNode::Gradient {
+            axis: Axis::Y,
+            tiling: TilingMode::ClampToEdge,
+            from,
+            to,
+            low,
+            high,
+        }) = self.resolve_references(input)?
+        else {
+            return Ok(None);
+        };
+        let (first, last) = (from.min(to), from.max(to));
+        if i64::from(last) - i64::from(first) > 1 << 16 {
+            return Ok(None);
+        }
+        // The compiled sampler's own arithmetic, at every y it varies over;
+        // beyond them the clamped value is that of the nearer end.
+        let gradient = GradientSampler::new(Axis::Y, TilingMode::ClampToEdge, from, to, low, high);
+        let inside = |y| -> Result<bool, CompileError> {
+            let value = gradient.compute(y)?;
+            Ok(value >= min && value < max)
+        };
+        let mut bounds = [i32::MAX, i32::MIN];
+        for y in first..=last {
+            if inside(y)? {
+                bounds[0] = bounds[0].min(y);
+                bounds[1] = y;
+            }
+        }
+        if inside(first)? {
+            bounds[0] = i32::MIN;
+        }
+        if inside(last)? {
+            bounds[1] = i32::MAX;
+        }
+        Ok(Some(bounds))
+    }
+    /// The node `id` names, past registry and direct references; `None` for
+    /// a bound or seeded sampler.
+    fn resolve_references(&self, mut id: FunctionId) -> Result<Option<&GraphNode>, CompileError> {
+        loop {
+            match &self.entry(id)?.definition {
+                Definition::Node(GraphNode::Reference { input, .. }) => id = *input,
+                Definition::Node(node) => return Ok(Some(node)),
+                Definition::Bound { .. } | Definition::Seeded { .. } => return Ok(None),
+            }
+        }
     }
 }

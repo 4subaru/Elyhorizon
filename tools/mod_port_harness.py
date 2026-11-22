@@ -31,6 +31,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from . import lab
+except ImportError:  # run as a script: its folder holds lab.py
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lab
+
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = ['blocks', 'properties', 'sounds', 'shapes', 'drops', 'placement', 'tags', 'recipes', 'items', 'item_stats']
 EXAMPLES = 8
@@ -222,12 +228,16 @@ def compare_mod(mod, oracle, horizon, carry, upgrades, old_items, carry_dir=None
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--work', required=True)
-    parser.add_argument('--resources', default=str(ROOT / '.local/horizon-client/26.3'))
+    parser.add_argument('--resources', default=str(lab.RESOURCES))
     parser.add_argument('--jars', help='export the oracle facts from these jars first')
     parser.add_argument('--deps')
     parser.add_argument('mods', nargs='*')
     args = parser.parse_args()
     work = Path(args.work).resolve()
+    mods = args.mods or sorted(p.name for p in (work / 'mods').iterdir() if (p / 'carry').is_dir())
+    # A failed or interrupted attempt must not leave a previous green verdict available to report.
+    for mod in mods:
+        (work / 'mods' / mod / 'harness' / 'result.json').unlink(missing_ok=True)
     facts = work / 'oracle' / 'facts.json'
     if args.jars:
         facts.parent.mkdir(parents=True, exist_ok=True)
@@ -237,14 +247,13 @@ def main():
         subprocess.run(command, check=True)
     if not facts.exists():
         sys.exit(f'{facts}: no oracle facts (run with --jars, or tools/neoforge_oracle.py export)')
-    subprocess.run(['cargo', 'build', '--release', '-q', '-p', 'horizon-client-lib', '--example', 'mod_port_probe'],
+    subprocess.run(['cargo', 'build', '--profile', 'fast', '-q', '-p', 'horizon-client-lib', '--example', 'mod_port_probe'],
                    cwd=ROOT, check=True)
     metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
                                                   cwd=ROOT, text=True))
-    probe = Path(metadata['target_directory']) / 'release/examples/mod_port_probe'
+    probe = Path(metadata['target_directory']) / 'fast/examples/mod_port_probe'
     oracle = json.loads(facts.read_text())
     old_items = set(oracle.get('vanilla_items', []))
-    mods = args.mods or sorted(p.name for p in (work / 'mods').iterdir() if (p / 'carry').is_dir())
     rows = []
     for mod in mods:
         # One mod at a time: each against vanilla, as a player adding it would load it (and a pack's

@@ -1,14 +1,11 @@
-"""bench/bench.py: the parsers, the report table and the per-server setup (no server is started)."""
+"""tools/bench.py: the parsers, the report table and the per-server setup (no server is started)."""
 
-import importlib.util
 from pathlib import Path
 import tempfile
 import types
 import unittest
 
-SPEC = importlib.util.spec_from_file_location('bench', Path(__file__).resolve().parent.parent / 'bench/bench.py')
-bench = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(bench)
+from tools import bench
 
 
 def args(**kw):
@@ -35,6 +32,16 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(bench.cpu_seconds('02:03'), 123.0)
         self.assertEqual(bench.percentile([5, 1, 3], 50), 3)
         self.assertIsNone(bench.percentile([], 50))
+
+    def test_percentile_is_nearest_rank(self):
+        # The rank is ceil(p/100 * n), so p50 of an even sample is the lower middle value, not the median,
+        # and p99 of 100 samples is the 99th, not the maximum. Odd samples keep the middle value.
+        self.assertEqual(bench.percentile([10, 20, 30, 40], 50), 20)
+        self.assertEqual(bench.percentile(list(range(1, 101)), 99), 99)
+        self.assertEqual(bench.percentile([40, 10, 30, 20], 50), 20)
+        self.assertEqual(bench.percentile([5, 1, 3], 50), 3)
+        self.assertEqual(bench.percentile([10, 20, 30, 40], 0), 10)
+        self.assertEqual(bench.percentile([10, 20, 30, 40], 100), 40)
 
     def test_bot_output_split(self):
         samples, summary = bench.split_bot_output(['{"t": 1, "online": 2}\n', '{\n', '  "joined": 2\n', '}\n'])

@@ -1,19 +1,23 @@
 //! Saved section palettes and storage-level chunk access. Changes here do not
 //! run block behavior, lighting, heightmaps, neighbor updates or scheduled ticks.
 pub use crate::block_state_properties::BlockProperties;
-use crate::{
-    DATA_VERSION,
-    compression::invalid,
-    nbt::{Compound, JavaString, NamedTag, Tag},
-    registry::{BlockRegistry, BlockStateId},
-    tick_data::{self, TickKind},
-};
 use horizon_core::{
     position::{BlockPos, ChunkPos},
     storage::PackedStorage,
     ticks::{ChunkTicks, SavedTick, TickTypeId},
 };
+use std::collections::HashMap;
 use std::io;
+use {
+    crate::{
+        DATA_VERSION,
+        compression::invalid,
+        registry::{BlockRegistry, BlockStateId},
+        tick_data,
+        tick_data::TickKind,
+    },
+    horizon_core::nbt::{Compound, JavaString, NamedTag, Tag},
+};
 
 fn key(value: &str) -> JavaString {
     JavaString::from(value)
@@ -24,6 +28,22 @@ fn bits_for_palette(len: usize, min: u8) -> u8 {
     } else {
         ((usize::BITS - (len - 1).leading_zeros()) as u8).max(min)
     }
+}
+
+/// `BlockEntity.getPosFromTag(chunk, tag)`: a saved block entity's `x`, `y`,
+/// `z`, moved into `chunk` when the tag names another chunk. Vanilla warns
+/// about such a save and keeps only the low four bits of each coordinate, so
+/// the entity stays in the chunk that held it instead of landing in one that
+/// never did.
+pub fn block_entity_pos(pos: (i32, i32, i32), chunk: [i32; 2]) -> (i32, i32, i32) {
+    let (x, y, z) = pos;
+    if (x >> 4, z >> 4) == (chunk[0], chunk[1]) {
+        return pos;
+    }
+    log::warn!(
+        "Block entity at {x} {y} {z} found in a wrong chunk, expected position from chunk {chunk:?}"
+    );
+    (chunk[0] * 16 + (x & 15), y, chunk[1] * 16 + (z & 15))
 }
 
 #[derive(Clone, Debug)]
@@ -146,10 +166,34 @@ impl PalettedContainer {
         Ok(())
     }
 
+    /// `PalettedContainer.pack`: the cells re-encoded into a fresh palette in
+    /// first-use order, so a slot no cell holds any more is not written and the
+    /// bit count is the one for the entries that remain. Saving the palette as
+    /// it is would keep a state a block edit replaced and pack wider than
+    /// vanilla writes for the same cells.
     pub fn to_nbt(&self) -> Tag {
         let mut map = self.extra.clone();
-        map.insert(key("palette"), Tag::List(self.palette.clone()));
-        if let Some(storage) = &self.storage {
+        let mut palette: Vec<&Tag> = Vec::with_capacity(self.palette.len());
+        let mut seen: HashMap<&Tag, u32> = HashMap::with_capacity(self.palette.len());
+        let mut ids = Vec::with_capacity(self.entries);
+        for index in 0..self.entries {
+            let id = self.storage.as_ref().map_or(0, |s| s.get(index).unwrap()) as usize;
+            let value = &self.palette[id];
+            ids.push(*seen.entry(value).or_insert_with(|| {
+                palette.push(value);
+                palette.len() as u32 - 1
+            }));
+        }
+        let bits = bits_for_palette(palette.len(), self.min_bits);
+        map.insert(
+            key("palette"),
+            Tag::List(palette.into_iter().cloned().collect()),
+        );
+        if bits > 0 {
+            let mut storage = PackedStorage::new(bits, self.entries).unwrap();
+            for (index, id) in ids.into_iter().enumerate() {
+                storage.set(index, id).unwrap();
+            }
             map.insert(
                 key("data"),
                 Tag::LongArray(storage.words().iter().map(|&v| v as i64).collect()),
@@ -213,20 +257,32 @@ impl BlockState {
     }
 }
 
+/// `SerializableChunkData.postLoadChunk`: the entities a saved full chunk keeps in its own
+/// `entities` list, which `ServerLevel.addLegacyChunkEntities` adds as the chunk loads. Only a
+/// chunk last saved before 1.17 gave entities files of their own (`entities/`) has any; saving a
+/// full chunk writes no such list.
+pub fn legacy_entities(root: &Tag) -> Vec<Tag> {
+    match root.get("entities") {
+        Some(Tag::List(entities)) => entities.clone(),
+        _ => Vec::new(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ChunkData {
     root: NamedTag,
     position: ChunkPos,
 }
 impl ChunkData {
-    pub fn new(root: NamedTag) -> io::Result<Self> {
-        let Some(Tag::Int(x)) = root.tag.get("xPos") else {
-            return Err(invalid("chunk is missing xPos"));
-        };
-        let Some(Tag::Int(z)) = root.tag.get("zPos") else {
-            return Err(invalid("chunk is missing zPos"));
-        };
-        let position = ChunkPos::new(*x, *z);
+    pub fn new(mut root: NamedTag) -> io::Result<Self> {
+        // `SerializableChunkData.parse` reads the position with
+        // `getIntOr("xPos", 0)` and `getIntOr("zPos", 0)`, so a chunk that does
+        // not carry them is the chunk at 0, 0; `Tag.asInt` also takes the
+        // narrower integer tags, not only `Int`.
+        let position = ChunkPos::new(
+            int_or_zero(&root.tag, "xPos"),
+            int_or_zero(&root.tag, "zPos"),
+        );
         let Some(Tag::Int(version)) = root.tag.get("DataVersion") else {
             return Err(invalid("chunk is missing DataVersion"));
         };
@@ -235,8 +291,18 @@ impl ChunkData {
                 "expected DataVersion {DATA_VERSION}, got {version}; data fixing is not implemented"
             )));
         }
-        let Some(Tag::List(sections)) = root.tag.get("sections") else {
-            return Err(invalid("chunk is missing sections"));
+        // `SerializableChunkData.parse` reads `getListOrEmpty("sections")`, so a
+        // chunk without one is a chunk with no sections. Keep an empty list in
+        // the tag: that is what the writer would put there, and every reader
+        // below finds it.
+        if !matches!(root.tag.get("sections"), Some(Tag::List(_))) {
+            let Tag::Compound(map) = &mut root.tag else {
+                unreachable!()
+            };
+            map.insert(key("sections"), Tag::List(Vec::new()));
+        }
+        let Tag::List(sections) = root.tag.get("sections").unwrap() else {
+            unreachable!()
         };
         let mut seen = std::collections::BTreeSet::new();
         for section in sections {
@@ -366,6 +432,17 @@ fn id_in(
     Some(id)
 }
 #[cold]
+/// `CompoundTag.getIntOr(name, 0)`: the tag as Java's `Tag.asInt` reads it,
+/// which is any integer tag, or 0.
+fn int_or_zero(tag: &Tag, name: &str) -> i32 {
+    match tag.get(name) {
+        Some(Tag::Byte(v)) => i32::from(*v),
+        Some(Tag::Short(v)) => i32::from(*v),
+        Some(Tag::Int(v)) => *v,
+        Some(Tag::Long(v)) => *v as i32,
+        _ => 0,
+    }
+}
 fn out_of_bounds() -> io::Error {
     invalid("section index out of bounds")
 }
@@ -379,6 +456,20 @@ pub struct BlockSection<'r> {
     extra: Compound,
 }
 impl<'r> BlockSection<'r> {
+    /// The section's heap bytes: its packed storage, and its palette, counts
+    /// and free list (`horizon-ctl memory`; extra NBT not counted).
+    pub fn heap_bytes(&self) -> [usize; 2] {
+        [
+            self.storage.as_ref().map_or(0, PackedStorage::heap_bytes),
+            self.palette.capacity() * std::mem::size_of::<BlockStateId>()
+                + self.counts.capacity() * std::mem::size_of::<u16>()
+                + self.free.capacity() * std::mem::size_of::<u32>(),
+        ]
+    }
+    /// Bits per block of its packed storage, 0 for a single-state section.
+    pub fn storage_bits(&self) -> u8 {
+        self.storage.as_ref().map_or(0, PackedStorage::bits)
+    }
     pub fn registry(&self) -> &'r BlockRegistry {
         self.registry
     }
@@ -453,6 +544,12 @@ impl<'r> BlockSection<'r> {
         let id = self.storage.as_ref().map_or(0, |s| s.read(index));
         self.palette[id as usize]
     }
+    /// The state of every block, when the section stores only one (no
+    /// word array).
+    #[inline]
+    pub(crate) fn uniform_state(&self) -> Option<BlockStateId> {
+        self.storage.is_none().then(|| self.palette[0])
+    }
     pub fn set(&mut self, index: usize, state: BlockStateId) -> io::Result<BlockStateId> {
         if index >= 4096 {
             return Err(invalid("section index out of bounds"));
@@ -460,9 +557,30 @@ impl<'r> BlockSection<'r> {
         if state.0 as usize >= self.registry.len() {
             return Err(invalid("state ID outside registry"));
         }
+        // A uniform section has one palette slot, all 4,096 blocks and no free
+        // slots, so a write either matches it or grows it to two states.
+        let Some(storage) = self.storage.as_ref() else {
+            debug_assert!(self.palette.len() == 1 && self.counts == [4096] && self.free.is_empty());
+            let old = self.palette[0];
+            if old == state {
+                return Ok(old);
+            }
+            let bits = bits_for_palette(2, 4);
+            let mut storage = PackedStorage::new(bits, 4096).map_err(|e| invalid(e.to_string()))?;
+            storage.write(index, 1);
+            self.storage = Some(storage);
+            self.palette.push(state);
+            self.counts[0] = 4095;
+            self.counts.push(1);
+            self.last = Some((state, 1));
+            return Ok(old);
+        };
         // The slot at `index` is the old state's id, so no palette lookup is
-        // needed for it; only the new state has to be resolved.
-        let old_id = self.storage.as_ref().map_or(0, |s| s.read(index));
+        // needed for it; only the new state has to be resolved. Reading and
+        // writing that slot share one position computation; growing the palette
+        // re-packs the storage, which looks the position up again.
+        let mut slot = storage.slot_of(index);
+        let old_id = storage.read_at(slot);
         let old = self.palette[old_id as usize];
         if old == state {
             return Ok(old);
@@ -486,11 +604,10 @@ impl<'r> BlockSection<'r> {
                     if next_bits != self.bits() {
                         let mut storage = PackedStorage::new(next_bits, 4096)
                             .map_err(|e| invalid(e.to_string()))?;
-                        if let Some(old) = &self.storage {
-                            for i in 0..4096 {
-                                storage.write(i, old.read(i));
-                            }
+                        for i in 0..4096 {
+                            storage.write(i, self.storage.as_ref().unwrap().read(i));
                         }
+                        slot = storage.slot_of(index);
                         self.storage = Some(storage);
                     }
                     self.palette.push(state);
@@ -500,16 +617,20 @@ impl<'r> BlockSection<'r> {
                 }
             }
         };
-        self.storage.as_mut().unwrap().write(index, id);
-        self.counts[old_id as usize] -= 1;
-        self.counts[id as usize] += 1;
-        if self.counts[old_id as usize] == 0 {
+        self.storage.as_mut().unwrap().write_at(slot, id);
+        // Both counts are read once and written back once: the two checks below
+        // use the values this call produced.
+        let old_count = self.counts[old_id as usize] - 1;
+        self.counts[old_id as usize] = old_count;
+        let new_count = self.counts[id as usize] + 1;
+        self.counts[id as usize] = new_count;
+        if old_count == 0 {
             self.free.push(old_id);
             if self.last == Some((old, old_id)) {
                 self.last = None;
             }
         }
-        if self.counts[id as usize] == 4096 {
+        if new_count == 4096 {
             self.palette = vec![state];
             self.last = Some((state, 0));
             self.counts = vec![4096];
@@ -552,29 +673,68 @@ impl<'r> BlockSection<'r> {
         let Some(id) = id_in(&self.palette, &self.counts, &mut self.last, state) else {
             return Ok(added);
         };
-        let Some(storage) = self.storage.as_mut() else {
-            return Ok(added);
+        // Ids are unique among live palette slots, so a cell already holds
+        // `state` exactly when it holds `id`, and held `air` exactly when it
+        // held `air_id` (written as a sentinel: no slot is that large).
+        let air_id = id_in(&self.palette, &self.counts, &mut self.last, air).unwrap_or(u32::MAX);
+        let head = index(top);
+        // A run in one column moves 256 entries per Y. While a word holds a
+        // whole number of those steps (every width generation produces: 1, 2, 4,
+        // 8, 16 and 32 bits per entry) the bit shift stays put, so the run walks
+        // its words directly. Other widths step the shift as well and go one
+        // `set` per block: the palette edits and non-air counts are the same,
+        // and the run's state is already in the palette by now.
+        const STRIDE: usize = 1 << 8;
+        let fixed = match self.storage.as_ref() {
+            // No word array: every block already is what the first write wrote.
+            None => return Ok(added),
+            Some(storage) => storage.fixed_shift(STRIDE),
         };
-        for y in (y_start..top).rev() {
-            let i = index(y);
-            let old_id = storage.read(i);
-            let old_state = self.palette[old_id as usize];
-            if old_state == state {
+        if !fixed {
+            // A cell that already held the run's state is not counted, so a run
+            // of air over air adds nothing here; the top block above is counted
+            // either way.
+            for y in (y_start..top).rev() {
+                if self.set(index(y), state)? == air && state != air {
+                    added += 1;
+                }
+            }
+            return Ok(added);
+        }
+        let counts = &mut self.counts;
+        let free = &mut self.free;
+        let last = &mut self.last;
+        let palette = &self.palette;
+        // `counts[id]` is read nowhere in the loop, so its shares are added up.
+        let mut gained = 0u16;
+        let mut run = self
+            .storage
+            .as_mut()
+            .expect("the section is not uniform")
+            .word_run(head, STRIDE, id);
+        // Counted down rather than iterated over the Y range: the range's own
+        // bookkeeping was a sixth of the loop's instructions.
+        let mut left = top - y_start;
+        while left > 0 {
+            left -= 1;
+            let old_id = run.write_back();
+            if old_id == id {
                 continue;
             }
-            storage.write(i, id);
-            self.counts[old_id as usize] -= 1;
-            self.counts[id as usize] += 1;
-            if old_state == air {
+            gained += 1;
+            let old_count = counts[old_id as usize] - 1;
+            counts[old_id as usize] = old_count;
+            if old_id == air_id {
                 added += 1;
             }
-            if self.counts[old_id as usize] == 0 {
-                self.free.push(old_id);
-                if self.last == Some((old_state, old_id)) {
-                    self.last = None;
+            if old_count == 0 {
+                free.push(old_id);
+                if *last == Some((palette[old_id as usize], old_id)) {
+                    *last = None;
                 }
             }
         }
+        counts[id as usize] += gained;
         if self.counts[id as usize] == 4096 {
             self.palette = vec![state];
             self.last = Some((state, 0));
@@ -637,348 +797,4 @@ impl<'r> BlockSection<'r> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn palette_grows_across_word_widths_and_compacts_to_uniform() {
-        let mut palette = PalettedContainer::uniform(Tag::Int(0), 4096, 4).unwrap();
-        for i in 0..4096 {
-            palette.set(i, Tag::Int(i as i32)).unwrap();
-        }
-        assert_eq!(palette.bits(), 12);
-        let mut loaded = PalettedContainer::from_nbt(&palette.to_nbt(), 4096, 4).unwrap();
-        for i in 0..4096 {
-            assert_eq!(loaded.get(i).unwrap(), &Tag::Int(i as i32));
-            loaded.set(i, Tag::Int(7)).unwrap();
-        }
-        loaded.compact().unwrap();
-        assert_eq!(loaded.bits(), 0);
-        assert_eq!(loaded.palette_len(), 1);
-        assert!(loaded.to_nbt().get("data").is_none());
-        assert_eq!(loaded.get(4095).unwrap(), &Tag::Int(7));
-    }
-    #[test]
-    fn invalid_palette_data_fails_before_access() {
-        let mut tag = Tag::compound([("palette", Tag::List(vec![Tag::Int(0), Tag::Int(1)]))]);
-        assert!(PalettedContainer::from_nbt(&tag, 4096, 4).is_err());
-        let Tag::Compound(map) = &mut tag else {
-            unreachable!()
-        };
-        map.insert(key("data"), Tag::LongArray(vec![-1; 256]));
-        assert!(PalettedContainer::from_nbt(&tag, 4096, 4).is_err());
-    }
-
-    /// The pre-optimization `get`, kept to compare against in the benchmark.
-    fn baseline_get(section: &BlockSection<'_>, index: usize) -> io::Result<BlockStateId> {
-        if index >= 4096 {
-            return Err(invalid("section index out of bounds"));
-        }
-        let id = section
-            .storage
-            .as_ref()
-            .map_or(0, |s| s.get(index).unwrap());
-        Ok(section.palette[id as usize])
-    }
-    /// The pre-optimization `set`, kept to compare against in the benchmark.
-    fn baseline_set(
-        section: &mut BlockSection<'_>,
-        index: usize,
-        state: BlockStateId,
-    ) -> io::Result<BlockStateId> {
-        let old = baseline_get(section, index)?;
-        if state.0 as usize >= section.registry.len() {
-            return Err(invalid("state ID outside registry"));
-        }
-        if old == state {
-            return Ok(old);
-        }
-        // Dead slots stay in `palette` but are on the free list: the old map
-        // removed them, so only live entries count for either lookup.
-        let old_id = section
-            .palette
-            .iter()
-            .enumerate()
-            .find(|&(id, &s)| s == old && section.counts[id] != 0)
-            .map(|(id, _)| id as u32)
-            .unwrap();
-        let known = section
-            .palette
-            .iter()
-            .enumerate()
-            .find(|&(id, &s)| s == state && section.counts[id] != 0)
-            .map(|(id, _)| id as u32);
-        if section.counts[old_id as usize] == 1 && known.is_none() {
-            section.palette[old_id as usize] = state;
-            return Ok(old);
-        }
-        let id = if let Some(id) = known {
-            id
-        } else if let Some(id) = section.free.pop() {
-            section.palette[id as usize] = state;
-            id
-        } else {
-            let id = section.palette.len() as u32;
-            let next_bits = bits_for_palette(section.palette.len() + 1, 4);
-            if next_bits != section.bits() {
-                let mut storage =
-                    PackedStorage::new(next_bits, 4096).map_err(|e| invalid(e.to_string()))?;
-                if let Some(old) = &section.storage {
-                    for i in 0..4096 {
-                        storage.set(i, old.get(i).unwrap()).unwrap();
-                    }
-                }
-                section.storage = Some(storage);
-            }
-            section.palette.push(state);
-            section.counts.push(0);
-            id
-        };
-        section
-            .storage
-            .as_mut()
-            .unwrap()
-            .set(index, id)
-            .map_err(|e| invalid(e.to_string()))?;
-        section.counts[old_id as usize] -= 1;
-        section.counts[id as usize] += 1;
-        if section.counts[old_id as usize] == 0 {
-            section.free.push(old_id);
-        }
-        if section.counts[id as usize] == 4096 {
-            section.palette = vec![state];
-            section.counts = vec![4096];
-            section.free.clear();
-            section.storage = None;
-        }
-        Ok(old)
-    }
-
-    fn benchmark_registry(states: usize) -> BlockRegistry {
-        let list: Vec<Tag> = (0..states)
-            .map(|i| {
-                Tag::compound([("id", Tag::String(format!("minecraft:b{i}").as_str().into()))])
-            })
-            .collect();
-        let defaults: std::collections::BTreeMap<_, _> = (0..states)
-            .map(|i| {
-                (
-                    JavaString::from(format!("minecraft:b{i}").as_str()),
-                    Tag::Int(i as i32),
-                )
-            })
-            .collect();
-        let tag = Tag::compound([
-            ("DataVersion", Tag::Int(crate::DATA_VERSION)),
-            ("states", Tag::List(list)),
-            ("defaults", Tag::Compound(defaults)),
-        ]);
-        BlockRegistry::from_nbt(&tag).unwrap()
-    }
-
-    /// `fill_states` reads what `state` reads at every index, from a uniform
-    /// section (no storage) through every palette width.
-    #[test]
-    fn fill_states_matches_state() {
-        let registry = benchmark_registry(64);
-        for &(distinct, seed) in &[(1u64, 1u64), (2, 2), (16, 3), (17, 4), (64, 6)] {
-            let mut section = BlockSection::uniform(BlockStateId(0), &registry).unwrap();
-            let mut rng = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-            let mut out = [0u32; 4096];
-            for round in 0..4 {
-                section.fill_states(&mut out);
-                for (index, &value) in out.iter().enumerate() {
-                    assert_eq!(value, section.state(index).0, "round {round} index {index}");
-                }
-                for _ in 0..2_000 {
-                    rng ^= rng << 13;
-                    rng ^= rng >> 7;
-                    rng ^= rng << 17;
-                    let index = (rng % 4096) as usize;
-                    let value = ((rng >> 20) % distinct) as u32;
-                    section.set(index, BlockStateId(value)).unwrap();
-                }
-            }
-        }
-    }
-
-    /// The optimized `set`/`get` must agree with the pre-optimization ones on
-    /// every field, across growth, collapse and reclaimed palette slots.
-    #[test]
-    fn set_matches_baseline_under_random_edits() {
-        let registry = benchmark_registry(64);
-        for &(distinct, seed) in &[(1u64, 1u64), (2, 2), (16, 3), (17, 4), (24, 5), (64, 6)] {
-            let mut base = BlockSection::uniform(BlockStateId(0), &registry).unwrap();
-            let mut fast = BlockSection::uniform(BlockStateId(0), &registry).unwrap();
-            let mut rng = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-            let mut next = || {
-                rng ^= rng << 13;
-                rng ^= rng >> 7;
-                rng ^= rng << 17;
-                rng
-            };
-            for step in 0..50_000u32 {
-                if step % 5_000 == 4_999 {
-                    let value = (next() % distinct) as u32;
-                    for index in 0..4096 {
-                        assert_eq!(
-                            baseline_set(&mut base, index, BlockStateId(value)).unwrap(),
-                            fast.set(index, BlockStateId(value)).unwrap()
-                        );
-                    }
-                } else {
-                    let index = (next() % 4096) as usize;
-                    let value = (next() % distinct) as u32;
-                    assert_eq!(
-                        baseline_set(&mut base, index, BlockStateId(value)).unwrap(),
-                        fast.set(index, BlockStateId(value)).unwrap()
-                    );
-                }
-                assert_eq!(base.bits(), fast.bits());
-            }
-            assert_eq!(base.palette, fast.palette);
-            assert_eq!(base.counts, fast.counts);
-            assert_eq!(base.free, fast.free);
-            for index in 0..4096 {
-                assert_eq!(
-                    baseline_get(&base, index).unwrap(),
-                    fast.get(index).unwrap(),
-                    "distinct {distinct} index {index}"
-                );
-            }
-            assert_eq!(base.to_nbt().unwrap(), fast.to_nbt().unwrap());
-        }
-    }
-
-    /// A lookup must not revive a freed palette slot: the next new state pops
-    /// that slot off the free list and would silently overwrite it.
-    #[test]
-    fn lookups_do_not_revive_freed_palette_slots() {
-        let registry = benchmark_registry(8);
-        let mut section = BlockSection::uniform(BlockStateId(0), &registry).unwrap();
-        for (index, state) in [(3, 3), (0, 1), (0, 0), (1, 1), (2, 2)] {
-            section.set(index, BlockStateId(state)).unwrap();
-        }
-        assert_eq!(section.get(1).unwrap(), BlockStateId(1));
-        assert_eq!(section.get(2).unwrap(), BlockStateId(2));
-        assert_eq!(section.get(3).unwrap(), BlockStateId(3));
-    }
-
-    /// `set` and `get` against the pre-optimization implementations, on the same
-    /// edit stream. The result is checked before timing; 51 measured rounds
-    /// alternate order and report the median and best nanosecond-per-operation.
-    #[test]
-    #[ignore = "microbenchmark; run with --ignored --nocapture"]
-    fn benchmark_section_get_set() {
-        use std::{hint::black_box, time::Instant};
-        const OPS: usize = 50_000;
-        const ROUNDS: u32 = 51;
-        let registry = benchmark_registry(32);
-        let mut rng = 0x1234_5678_9abc_def1u64;
-        let mut next = || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        let ops: Vec<(usize, u32)> = (0..OPS)
-            .map(|_| ((next() % 4096) as usize, (next() % 24) as u32))
-            .collect();
-        let make = || BlockSection::uniform(BlockStateId(0), &registry).unwrap();
-
-        let mut base = make();
-        let mut fast = make();
-        for &(index, value) in &ops {
-            assert_eq!(
-                baseline_set(&mut base, index, BlockStateId(value)).unwrap(),
-                fast.set(index, BlockStateId(value)).unwrap()
-            );
-        }
-        assert_eq!(base.bits(), fast.bits());
-        assert_eq!(base.palette, fast.palette);
-        assert_eq!(base.counts, fast.counts);
-        assert_eq!(base.free, fast.free);
-        assert_eq!(base.to_nbt().unwrap(), fast.to_nbt().unwrap());
-        for i in 0..4096 {
-            assert_eq!(baseline_get(&base, i).unwrap(), fast.get(i).unwrap());
-        }
-
-        let mut times = [Vec::new(), Vec::new()];
-        for round in 0..ROUNDS {
-            for optimized in [round % 2 == 0, round % 2 != 0] {
-                let mut section = make();
-                let started = Instant::now();
-                for &(index, value) in &ops {
-                    if optimized {
-                        section
-                            .set(black_box(index), black_box(BlockStateId(value)))
-                            .unwrap();
-                    } else {
-                        baseline_set(
-                            &mut section,
-                            black_box(index),
-                            black_box(BlockStateId(value)),
-                        )
-                        .unwrap();
-                    }
-                }
-                black_box(&section);
-                if round > 0 {
-                    times[usize::from(optimized)]
-                        .push(started.elapsed().as_secs_f64() * 1e9 / OPS as f64);
-                }
-            }
-        }
-        for values in &mut times {
-            values.sort_by(f64::total_cmp);
-        }
-        let median = |v: &[f64]| v[v.len() / 2];
-        println!(
-            "section set median: baseline {:.3} ns/op optimized {:.3} ns/op speedup {:.3}x",
-            median(&times[0]),
-            median(&times[1]),
-            median(&times[0]) / median(&times[1])
-        );
-        println!(
-            "section set best:   baseline {:.3} ns/op optimized {:.3} ns/op speedup {:.3}x",
-            times[0][0],
-            times[1][0],
-            times[0][0] / times[1][0]
-        );
-
-        let mut get_times = [Vec::new(), Vec::new()];
-        for round in 0..ROUNDS {
-            for optimized in [round % 2 == 0, round % 2 != 0] {
-                let started = Instant::now();
-                let mut acc = 0u32;
-                for &(index, _) in &ops {
-                    let state = if optimized {
-                        fast.get(black_box(index)).unwrap()
-                    } else {
-                        baseline_get(&base, black_box(index)).unwrap()
-                    };
-                    acc ^= state.0;
-                }
-                black_box(acc);
-                if round > 0 {
-                    get_times[usize::from(optimized)]
-                        .push(started.elapsed().as_secs_f64() * 1e9 / OPS as f64);
-                }
-            }
-        }
-        for values in &mut get_times {
-            values.sort_by(f64::total_cmp);
-        }
-        println!(
-            "section get median: baseline {:.3} ns/op optimized {:.3} ns/op speedup {:.3}x",
-            median(&get_times[0]),
-            median(&get_times[1]),
-            median(&get_times[0]) / median(&get_times[1])
-        );
-        println!(
-            "section get best:   baseline {:.3} ns/op optimized {:.3} ns/op speedup {:.3}x",
-            get_times[0][0],
-            get_times[1][0],
-            get_times[0][0] / get_times[1][0]
-        );
-    }
-}
+mod tests;

@@ -4,12 +4,20 @@
 //! and each Java mod it ported into `horizon-mods/`: where it came from, its version and its
 //! checksum. Files the player put there themselves are never touched: the browser only replaces
 //! or removes what it lists.
-use super::{pick, safe_name, Kind, Project, Source, SourceId, Support, Version};
+use super::{pick, plain_name, Kind, Project, Source, SourceId, Support, Version};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-const MANIFEST: &str = "mod-browser.json";
+pub(crate) const MANIFEST: &str = "mod-browser.json";
+/// The folders the browser installs into: an entry's `file` is always inside one of them.
+const FOLDERS: [&str; 5] = [
+    "mods",
+    "resourcepacks",
+    "shaderpacks",
+    super::java::MODS_DIR,
+    crate::native_mods::INSTALLED,
+];
 /// How deep required dependencies are followed.
 const MAX_DEPTH: usize = 4;
 
@@ -41,10 +49,31 @@ pub struct Entry {
     pub namespaces: Vec<String>,
 }
 
+/// Whether `file` names something inside one of the folders the browser installs into, made of
+/// plain names only (no root, drive or `..`), so `home.join(file)` stays in the game folder. The
+/// list is a file in that folder, which a modpack could have put there: an entry naming any other
+/// place must never make the browser remove or rename it.
+pub fn in_folders(file: &str) -> bool {
+    let mut parts = Path::new(file).components();
+    let top = parts.next();
+    matches!(top, Some(Component::Normal(t)) if FOLDERS.iter().any(|f| t == *f))
+        && parts.clone().next().is_some()
+        && parts.all(|c| matches!(c, Component::Normal(_)))
+}
+
+impl Entry {
+    /// Where the entry's file is in the game folder `home`, when it is inside one the browser
+    /// installs into ([`in_folders`]).
+    pub fn path(&self, home: &Path) -> Option<PathBuf> {
+        in_folders(&self.file).then(|| home.join(&self.file))
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Installed {
     /// An entry this launcher can't read (a shader pack, which older launchers installed) is
-    /// left out, and its file left where it is.
+    /// left out, and its file left where it is; so is one whose file is outside the folders the
+    /// browser installs into ([`in_folders`]).
     #[serde(deserialize_with = "readable_entries")]
     pub entries: Vec<Entry>,
 }
@@ -53,7 +82,17 @@ fn readable_entries<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Entry>
     let entries = Vec::<serde_json::Value>::deserialize(d)?;
     Ok(entries
         .into_iter()
-        .filter_map(|e| serde_json::from_value(e).ok())
+        .filter_map(|e| serde_json::from_value::<Entry>(e).ok())
+        .filter(|e| {
+            let kept = in_folders(&e.file);
+            if !kept {
+                eprintln!(
+                    "{MANIFEST}: left out {:?}, whose file {:?} isn't in a pack or mod folder",
+                    e.title, e.file
+                );
+            }
+            kept
+        })
         .collect())
 }
 
@@ -65,13 +104,22 @@ impl Installed {
             .unwrap_or_default()
     }
 
+    /// Atomically publishes the list. Mutating callers must hold `lock_home`
+    /// from before `load` through this save, not just while writing the file.
     pub fn save(&self, home: &Path) -> Result<(), String> {
+        let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = home.join(MANIFEST);
-        let part = home.join(format!(".{MANIFEST}.part"));
+        let part = home.join(format!(".{MANIFEST}.{}-{id}.part", std::process::id()));
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
-        fs::write(&part, text).map_err(|e| format!("{}: {e}", part.display()))?;
-        fs::rename(&part, &path).map_err(|e| format!("{}: {e}", path.display()))
+        let res = fs::write(&part, text).and_then(|()| fs::rename(&part, &path));
+        if let Err(e) = res {
+            let _ = fs::remove_file(&part);
+            return Err(format!("{}: {e}", path.display()));
+        }
+        Ok(())
     }
 
     pub fn find(&self, source: SourceId, project: &str) -> Option<&Entry> {
@@ -112,13 +160,22 @@ pub fn plan(source: &dyn Source, project: &Project, everything: bool) -> Result<
         ));
     }
     let mut steps = Vec::new();
-    add(source, project.clone(), everything, false, 0, &mut steps)?;
+    add(
+        source,
+        project.clone(),
+        None,
+        everything,
+        false,
+        0,
+        &mut steps,
+    )?;
     Ok(steps)
 }
 
 fn add(
     source: &dyn Source,
     project: Project,
+    reviewed: Option<&Version>,
     everything: bool,
     dependency: bool,
     depth: usize,
@@ -128,17 +185,20 @@ fn add(
         return Ok(());
     }
     if depth > MAX_DEPTH {
-        return Err(format!("{}'s dependencies go too deep.", project.title));
+        return Err(crate::i18n::trf(
+            "{pack}'s dependencies go too deep.",
+            &[("pack", &project.title)],
+        ));
     }
     if let Support::No(why) = project.support() {
         return Err(format!("{} doesn't run in Horizon: {why}", project.title));
     }
-    let versions = source.versions(&project)?;
-    let Some(version) = pick(project.kind, &versions, everything).cloned() else {
-        return Err(match versions.iter().find_map(|v| v.blocked.clone()) {
-            Some(why) => format!("{} can't be installed from here: {why}", project.title),
-            None => format!("{} has no version Horizon runs.", project.title),
-        });
+    let version = match reviewed {
+        Some(version) => version.clone(),
+        None => {
+            let versions = source.versions(&project)?;
+            select_version(&project, &versions, everything)?.clone()
+        }
     };
     for id in &version.required {
         let needed = source.project(id).map_err(|_| {
@@ -148,10 +208,19 @@ fn add(
                 source.id().label()
             )
         })?;
+        if project.source == SourceId::Modrinth
+            && project.kind == Kind::ResourcePack
+            && needed.kind == Kind::Mod
+        {
+            return Err(crate::i18n::tr(
+                "This version requires Java mods that the resource-pack installer cannot install.",
+            )
+            .into());
+        }
         if needed.kind.folder().is_none() {
             return Err(format!("{} needs {}.", project.title, needed.title));
         }
-        add(source, needed, everything, true, depth + 1, steps)?;
+        add(source, needed, None, everything, true, depth + 1, steps)?;
     }
     steps.push(Step {
         project,
@@ -159,6 +228,156 @@ fn add(
         dependency,
     });
     Ok(())
+}
+
+fn select_version<'a>(
+    project: &Project,
+    versions: &'a [Version],
+    everything: bool,
+) -> Result<&'a Version, String> {
+    use crate::i18n::trf;
+    pick(project.kind, versions, everything).ok_or_else(|| {
+        match versions.iter().find_map(|v| v.blocked.as_deref()) {
+            Some(why) => trf(
+                "{pack} can't be installed from here: {why}",
+                &[("pack", &project.title), ("why", why)],
+            ),
+            None => trf(
+                "{pack} has no version Horizon runs.",
+                &[("pack", &project.title)],
+            ),
+        }
+    })
+}
+
+/// The dependency files selected and checked together before any download.
+#[derive(Clone)]
+pub struct PackReview {
+    pub support: Support,
+    optional_java_mods: bool,
+    steps: Vec<Step>,
+}
+
+impl PackReview {
+    pub fn confirm_optional_mods(&self, confirm: impl FnOnce(&Version, &str) -> bool) -> bool {
+        !self.optional_java_mods
+            || confirm(
+                &self
+                    .steps
+                    .last()
+                    .expect("review includes the requested pack")
+                    .version,
+                optional_mod_warning(),
+            )
+    }
+}
+
+pub fn review_resource_pack(
+    source: &dyn Source,
+    project: &Project,
+    versions: &[Version],
+    everything: bool,
+) -> Result<PackReview, String> {
+    debug_assert_eq!(
+        (project.source, project.kind),
+        (SourceId::Modrinth, Kind::ResourcePack)
+    );
+    let version = select_version(project, versions, everything)?;
+    let mut support = project.support_for(&version.game_versions);
+    let mut steps = Vec::new();
+    add(
+        source,
+        project.clone(),
+        Some(version),
+        everything,
+        false,
+        0,
+        &mut steps,
+    )?;
+    let mut optional_java_mods = false;
+    'scan: for step in steps
+        .iter()
+        .filter(|step| step.project.kind == Kind::ResourcePack)
+    {
+        for dependency in &step.version.optional {
+            if dependency.is_java_mod(source)? {
+                optional_java_mods = true;
+                break 'scan;
+            }
+        }
+    }
+    if optional_java_mods {
+        let why = optional_mod_warning();
+        support = Support::Partial(match support.reason() {
+            Some(other) => [other, why].join(" "),
+            None => why.into(),
+        });
+    }
+    Ok(PackReview {
+        support,
+        optional_java_mods,
+        steps,
+    })
+}
+
+fn optional_mod_warning() -> &'static str {
+    crate::i18n::tr("Features that use optional Java mods may be missing in Horizon.")
+}
+
+/// Installs the same files presented by the review, including its dependencies.
+pub fn install_reviewed_resource_pack(
+    source: &dyn Source,
+    review: PackReview,
+    home: &Path,
+    progress: &dyn Fn(&str, f32),
+) -> Result<Vec<Entry>, String> {
+    put(
+        source,
+        review.steps,
+        home,
+        &|kind| kind.folder().expect("plan keeps folder kinds"),
+        progress,
+    )
+}
+
+/// Check the exact update before replacing the installed file. Partly compatible
+/// updates need the player's confirmation; ordinary updates go straight through.
+pub fn update_modrinth_resource_pack(
+    source: &dyn Source,
+    entry: &Entry,
+    home: &Path,
+    confirm: &dyn Fn(&Version, &str) -> bool,
+    progress: &dyn Fn(&str, f32),
+) -> Result<Vec<Entry>, String> {
+    use crate::i18n::tr;
+
+    let project = source.project(&entry.project)?;
+    if project.kind != Kind::ResourcePack || project.source != SourceId::Modrinth {
+        return Err(tr("This project is no longer a Modrinth resource pack.").into());
+    }
+    let versions = source.versions(&project)?;
+    let version = select_version(&project, &versions, true)?;
+    if Installed::load(home)
+        .find(entry.source, &entry.project)
+        .is_some_and(|current| current.version == version.id && !file_missing(home, current))
+    {
+        return Ok(Vec::new());
+    }
+    let review = review_resource_pack(source, &project, &versions, true)?;
+    if !review.confirm_optional_mods(confirm) {
+        return Err(tr("Update canceled.").into());
+    }
+
+    // The UI can wait for an answer while another launcher changes the pack.
+    let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
+    let installed = Installed::load(home);
+    let still_installed = installed
+        .find(entry.source, &entry.project)
+        .is_some_and(|current| current.version == entry.version && !file_missing(home, current));
+    if !still_installed {
+        return Err(tr("The installed pack changed while this update was being checked.").into());
+    }
+    install_reviewed_resource_pack(source, review, home, progress)
 }
 
 /// Installs `project` (and what it needs) into the game folder `home`. A project already
@@ -170,6 +389,8 @@ pub fn install(
     home: &Path,
     progress: &dyn Fn(&str, f32),
 ) -> Result<Vec<Entry>, String> {
+    let _game = crate::game_shader_api::for_home(home);
+    let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
     if project.source == SourceId::Horizon {
         return super::horizon::install(project, home, progress);
     }
@@ -195,6 +416,7 @@ pub(super) fn put(
     folder: &dyn Fn(Kind) -> &'static str,
     progress: &dyn Fn(&str, f32),
 ) -> Result<Vec<Entry>, String> {
+    let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
     let mut installed = Installed::load(home);
     let mut done = Vec::new();
     for step in steps {
@@ -209,7 +431,8 @@ pub(super) fn put(
             .file()
             .expect("pick keeps versions with a file");
         let folder_name = folder(p.kind);
-        let name = safe_name(&file.name)
+        // The name the download is saved under (`download::save`).
+        let name = plain_name(&file.name)
             .ok_or_else(|| format!("{:?} isn't a plain file name.", file.name))?;
         let relative = format!("{folder_name}/{name}");
         let owner = installed.entries.iter().find(|e| e.file == relative);
@@ -230,8 +453,8 @@ pub(super) fn put(
         let path = source.fetch(file, &home.join(folder_name), &|f| progress(&line, f))?;
         let (algo, hash) = file.checksum().expect("fetch checks for one");
         if let Some(old) = &old {
-            if old.file != relative {
-                let _ = fs::remove_file(home.join(&old.file));
+            if let Some(file) = old.path(home).filter(|_| old.file != relative) {
+                let _ = fs::remove_file(file);
             }
         }
         let entry = Entry {
@@ -264,6 +487,7 @@ pub(super) fn put(
 
 /// Removes what the browser installed for `name` (a project id or slug): its file and its entry.
 pub fn remove(home: &Path, name: &str) -> Result<Entry, String> {
+    let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
     let mut installed = Installed::load(home);
     let entry = installed
         .lookup(name)
@@ -272,17 +496,13 @@ pub fn remove(home: &Path, name: &str) -> Result<Entry, String> {
     if entry.kind == Kind::Mod && entry.source != SourceId::Horizon {
         super::java::remove(home, &entry)?;
     } else {
-        match fs::remove_file(home.join(&entry.file)) {
+        match entry.path(home).map_or(Ok(()), fs::remove_file) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("{}: {e}", entry.file)),
         }
     }
     if let Some(id) = super::horizon::mod_id(&entry).filter(|_| entry.source == SourceId::Horizon) {
-        // The `.hmod` a mod that turned native left behind (horizon::install_version).
-        if entry.file.ends_with(".hnmod") {
-            let _ = fs::remove_file(home.join(super::java::MODS_DIR).join(format!("{id}.hmod")));
-        }
         super::java::set_enabled(home, id, false)?;
     }
     installed
@@ -290,6 +510,32 @@ pub fn remove(home: &Path, name: &str) -> Result<Entry, String> {
         .retain(|e| !(e.source == entry.source && e.project == entry.project));
     installed.save(home)?;
     Ok(entry)
+}
+
+/// Whether `entry`'s file is not found. Any other error reading it is not this.
+pub fn file_missing(home: &Path, entry: &Entry) -> bool {
+    entry.path(home).is_some_and(|path| {
+        matches!(fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
+/// Drops `entry` from the list only while it is listed exactly so and its file is still not
+/// found, both checked under the lock. It never touches a file. False, with nothing changed,
+/// when the row no longer says what it said (the file is back, or can't be read for another
+/// reason).
+pub fn forget_missing(home: &Path, entry: &Entry) -> Result<bool, String> {
+    // The lock would create the folder: a game folder that is gone has nothing to forget.
+    if !home.is_dir() {
+        return Ok(false);
+    }
+    let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
+    let mut installed = Installed::load(home);
+    if !installed.entries.contains(entry) || !file_missing(home, entry) {
+        return Ok(false);
+    }
+    installed.entries.retain(|e| e != entry);
+    installed.save(home)?;
+    Ok(true)
 }
 
 /// The newer version `entry` can be updated to, if any.
@@ -340,39 +586,46 @@ pub fn install_datapack(
     if project.kind != Kind::DataPack && !project.loaders.iter().any(|l| l == "datapack") {
         return Err(format!("{} isn't a data pack.", project.title));
     }
-    let versions = source.versions(project)?;
-    let version = pick(Kind::DataPack, &versions, everything).ok_or_else(|| {
-        format!(
-            "{} has no data pack for {}{}.",
-            project.title,
-            super::GAME,
-            if everything {
-                " or any other version"
-            } else {
-                ""
-            }
-        )
-    })?;
-    let file = version.file().expect("pick keeps versions with a file");
     let folder = std::env::temp_dir().join(format!(
         "horizon-launcher-datapack-{}-{}",
         std::process::id(),
-        version.id
+        project.id
     ));
-    let result = source.fetch(file, &folder, progress).and_then(|zip| {
+    // The registry's are checked against its index (signature, `pack.mcmeta` and `data/`).
+    let fetched = match project.source {
+        SourceId::Horizon => super::horizon::fetch_datapack(project, &folder, progress),
+        _ => {
+            let versions = source.versions(project)?;
+            let version = pick(Kind::DataPack, &versions, everything).ok_or_else(|| {
+                format!(
+                    "{} has no data pack for {}{}.",
+                    project.title,
+                    super::GAME,
+                    if everything {
+                        " or any other version"
+                    } else {
+                        ""
+                    }
+                )
+            })?;
+            let file = version.file().expect("pick keeps versions with a file");
+            source
+                .fetch(file, &folder, progress)
+                .map(|zip| (zip, version.number.clone()))
+        }
+    };
+    let result = fetched.and_then(|(zip, number)| {
         let coverage = crate::datapacks::coverage(&zip)?;
         if coverage.read.is_empty() {
-            return Err(format!(
-                "{} would change nothing in Horizon yet: it has no functions, predicates or item \
-                 modifiers, and Horizon doesn't read its {} yet.",
-                project.title,
-                coverage.not_read()
+            return Err(crate::i18n::trf(
+                "{title} would change nothing in Horizon yet: Horizon doesn't read its {files}.",
+                &[("title", &project.title), ("files", &coverage.not_read())],
             ));
         }
         let pack = crate::datapacks::add(world, &zip)?;
         Ok(DataPackInstall {
             pack,
-            number: version.number.clone(),
+            number,
             coverage,
         })
     });

@@ -5,7 +5,7 @@
 //! Offered: Java mods (Fabric, NeoForge, Forge), whose content Horizon ports and whose jar is
 //! checked before install ([`java`]), modpacks (imported and ported), resource packs
 //! (`resourcepacks/`) and data packs (into a world, [`installed::install_datapack`]). Java code
-//! itself doesn't run in Horizon (docs/mods.md).
+//! itself doesn't run in Horizon (docs/modding/src/how-to/content-mods.md).
 pub mod curseforge;
 pub mod details;
 pub mod download;
@@ -16,11 +16,13 @@ pub mod java;
 pub mod java_instance;
 pub mod modrinth;
 
+pub use horizon_platform::mod_package::install_lock::{lock_home, try_lock_home, HomeLockGuard};
+
 use serde::{Deserialize, Serialize};
 
-/// The Minecraft version Horizon plays. A version port updates it with the other `"26.3"` sites
-/// (docs/version-ports.md).
-pub const GAME: &str = "26.3";
+/// The Minecraft version Horizon plays: the pinned version, so a port's regenerated
+/// `crates/horizon-core/src/version.rs` moves it with everything else (docs/version-ports.md).
+pub const GAME: &str = horizon_platform::version::VERSION_ID;
 
 /// What a project is, as far as Horizon is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,8 +32,7 @@ pub enum Kind {
     Modpack,
     /// A Java mod: its content is ported ([`java`]).
     Mod,
-    /// One of Horizon's own shader packs (`.hshader`, docs/shaders.md), from Horizon's registry
-    /// only.
+    /// A native Horizon shader pack (`.hshader`) or an Iris/OptiFine shader pack.
     Shader,
     /// A data pack: it goes into one world's `datapacks/` (`crate::datapacks`).
     DataPack,
@@ -83,6 +84,16 @@ impl SourceId {
             SourceId::Modrinth => "Modrinth",
             SourceId::CurseForge => "CurseForge",
             SourceId::Horizon => "Horizon",
+        }
+    }
+
+    /// The source a list names after the author ("from {source}") for project `id`: Modrinth and
+    /// CurseForge always, Horizon's registry only for Horizon's own projects
+    /// ([`horizon::official`]), so a contributor's project reads "by <author>" alone.
+    pub fn shown_for(self, id: &str) -> Option<&'static str> {
+        match self {
+            SourceId::Horizon if !horizon::is_official(id) => None,
+            _ => Some(self.label()),
         }
     }
 }
@@ -137,11 +148,21 @@ pub struct Project {
     /// The Minecraft versions its files list, and the loaders (`fabric`, `neoforge`, `minecraft`...).
     pub game_versions: Vec<String>,
     pub loaders: Vec<String>,
+    /// Why no version of it can be installed here, when its source says so (a registry project
+    /// whose versions for this game were taken down or made for the earlier mod system).
+    pub blocked: Option<String>,
 }
 
 impl Project {
     pub fn support(&self) -> Support {
-        support(self.kind, &self.game_versions, &self.loaders)
+        self.support_for(&self.game_versions)
+    }
+
+    pub(super) fn support_for(&self, game_versions: &[String]) -> Support {
+        match &self.blocked {
+            Some(why) => Support::No(why.clone()),
+            None => support(self.kind, game_versions, &self.loaders),
+        }
     }
 
     /// The project as a data pack, for a search of data packs or an install into a world;
@@ -195,6 +216,7 @@ pub struct Version {
     pub files: Vec<FileRef>,
     /// Required dependencies, as project ids on the same source.
     pub required: Vec<String>,
+    pub optional: Vec<modrinth::OptionalDependency>,
     /// Why this version can't be downloaded from here (CurseForge authors can forbid it).
     pub blocked: Option<String>,
 }
@@ -269,6 +291,7 @@ pub const CURSEFORGE_SOON: &str = "CurseForge support is coming soon.";
 /// What another source answers for shader packs: Horizon's own are on its registry only.
 pub const SHADERS_ON_HORIZON: &str =
     "Horizon's shader packs are on Horizon's registry: pick Horizon.";
+const SHADER_LOADERS: [&str; 2] = ["iris", "optifine"];
 
 /// The sources this launcher uses: Modrinth and Horizon's registry. CurseForge support is coming
 /// soon: its API needs a paid key, so no search or install goes to it; `curseforge` is kept for
@@ -295,28 +318,40 @@ pub fn support(kind: Kind, game_versions: &[String], loaders: &[String]) -> Supp
     }
     match kind {
         Kind::ResourcePack => {
-            if game_versions.iter().any(|v| v == GAME) {
+            use crate::i18n::{tr, trf};
+            let mut warnings = Vec::new();
+            if !game_versions.iter().any(|v| v == GAME) {
+                warnings.push(match newest_release(game_versions) {
+                    Some(newest) => trf(
+                        "Made for {newest}: it loads with vanilla's compatibility warning, and \
+                         what changed since may look wrong.",
+                        &[("newest", newest)],
+                    ),
+                    None => tr("Lists no Minecraft version.").into(),
+                });
+            }
+            if loaders.iter().any(|l| matches!(l.as_str(), "modded" | "core-shaders")) {
+                warnings.push(tr("Core shaders or modded features in this pack may not work in Horizon.").into());
+            }
+            if warnings.is_empty() {
                 Support::Works
-            } else if let Some(newest) = newest_release(game_versions) {
-                Support::Partial(format!(
-                    "Made for {newest}: it loads with vanilla's compatibility warning, and \
-                     what changed since may look wrong."
-                ))
             } else {
-                Support::Partial("Lists no Minecraft version.".into())
+                Support::Partial(warnings.join(" "))
             }
         }
         Kind::Modpack => {
             Support::Partial("Horizon runs the mods it can port, from your own downloads.".into())
         }
-        Kind::Shader => Support::No("Not one of Horizon's own shader packs.".into()),
+        Kind::Shader => Support::Partial(
+            crate::i18n::tr("Horizon's shader loader can open Iris and OptiFine packs. Some effects may differ.").into(),
+        ),
         Kind::DataPack => {
             let made_for = match newest_release(game_versions) {
                 _ if game_versions.iter().any(|v| v == GAME) => String::new(),
                 Some(newest) => format!("Made for {newest}: the game may refuse it. "),
                 None => "Lists no Minecraft version. ".into(),
             };
-            Support::Partial(format!("{made_for}{DATAPACK_SUPPORT}"))
+            Support::Partial(format!("{made_for}{}", datapack_support()))
         }
         Kind::Mod => {
             if !loaders.iter().any(|l| java::LOADERS.contains(&l.as_str())) {
@@ -337,9 +372,11 @@ pub fn support(kind: Kind, game_versions: &[String], loaders: &[String]) -> Supp
 
 /// What a data pack does in Horizon today, said before install; the install says it for the
 /// pack's own files (`crate::datapacks::coverage`).
-pub const DATAPACK_SUPPORT: &str = "Horizon runs a data pack's functions, function tags, \
-     predicates and item modifiers; not yet its recipes, loot tables, advancements, other tags \
-     or worldgen.";
+pub fn datapack_support() -> &'static str {
+    crate::i18n::tr(
+        "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.",
+    )
+}
 
 /// A Minecraft version whose mods port-pack carries over: 1.21 and later (the data folders
 /// took their current names in 1.21).
@@ -403,6 +440,13 @@ pub fn pick(kind: Kind, versions: &[Version], everything: bool) -> Option<&Versi
             .find(made_for)
             .or_else(|| packs.find(|_| everything));
     }
+    if kind == Kind::Shader {
+        return usable.find(|v| {
+            v.loaders
+                .iter()
+                .any(|l| SHADER_LOADERS.contains(&l.as_str()))
+        });
+    }
     let runs = |v: &&Version| match support(kind, &v.game_versions, &v.loaders) {
         Support::Works => true,
         // A modpack's version is for its own Minecraft.
@@ -425,7 +469,41 @@ pub fn safe_name(name: &str) -> Option<&str> {
         && name.chars().all(|c| {
             !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
         });
-    ok.then_some(name)
+    // Windows opens a device for CON, NUL.jar, COM1.zip and so on, whatever follows the first dot.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|port| {
+            stem.strip_prefix(port).is_some_and(|n| {
+                let mut digits = n.chars();
+                matches!(digits.next(), Some('0'..='9' | '¹' | '²' | '³'))
+                    && digits.next().is_none()
+            })
+        });
+    // Bidirectional and invisible marks that make a shown name read as another.
+    let disguised = name.chars().any(|c| {
+        matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+    });
+    (ok && !device && !disguised).then_some(name)
+}
+
+/// The name a source's file is saved under: its own name with the characters Windows reserves
+/// for paths (`: * ? " < > |`) made `-`, as Modrinth names a pack after a project whose title
+/// holds a `:`. Whatever else [`safe_name`] refuses (separators, devices, disguising marks) is
+/// still refused.
+pub fn plain_name(name: &str) -> Option<String> {
+    let mapped: String = name
+        .chars()
+        .map(|c| match c {
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c => c,
+        })
+        .collect();
+    safe_name(&mapped).map(str::to_owned)
 }
 
 #[cfg(test)]
