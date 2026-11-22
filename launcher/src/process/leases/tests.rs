@@ -24,6 +24,28 @@ fn released(registry: &std::sync::Arc<Registry>, tree: &Dir) {
     }
 }
 
+/// The gate is free to take, once the kernel has caught up.
+///
+/// `unlock` releases it at once, but another parallel fork of this process can hold an untouched
+/// CLOEXEC copy of the descriptor for a moment longer, until its own exec closes it: a bare
+/// `try_lock` calls the gate held and fails a test whose real subject passed.
+#[cfg(unix)]
+fn gate_is_free(gate: &File) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match gate.try_lock() {
+            Ok(()) => {
+                gate.unlock().unwrap();
+                return;
+            }
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::yield_now()
+            }
+            other => panic!("gate remained held after failed exec or child exit: {other:?}"),
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn child_keeps_gate_and_tree_after_creator_closes_its_copies() {
@@ -125,8 +147,7 @@ fn child_keeps_gate_and_tree_after_creator_closes_its_copies() {
     assert!(errors.contains("BRIDGE-STDERR"));
     released(&registry, &trees[0]);
     drop(registry);
-    gate.try_lock().unwrap();
-    gate.unlock().unwrap();
+    gate_is_free(&gate);
 }
 
 #[cfg(windows)]
@@ -296,6 +317,5 @@ fn failed_exec_leaves_no_tree_or_gate_owner() {
         .write(true)
         .open(data.join("run-leases/gate"))
         .unwrap();
-    gate.try_lock().unwrap();
-    gate.unlock().unwrap();
+    gate_is_free(&gate);
 }
