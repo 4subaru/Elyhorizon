@@ -79,9 +79,11 @@ fn prepare_download_explains_the_sign_in_requirement() {
     .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     assert!(out.stdout.is_empty(), "{}", text(&out));
+    // The fork's own sentence, through `tr`, not upstream #17829's ".. to download 26.3 from
+    // Mojang.": this launcher's refusal names Ely.by as a way in, so the fork owns this text.
     assert_eq!(
         String::from_utf8_lossy(&out.stderr).trim(),
-        "error: Sign in with a Microsoft account that owns Minecraft: Java Edition to download 26.3 from Mojang."
+        "error: Sign in with Ely.by or a Microsoft account that owns Minecraft to install game files automatically."
     );
     assert!(!root.join("launcher/minecraft").exists());
     let _ = std::fs::remove_dir_all(&root);
